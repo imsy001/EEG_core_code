@@ -29,8 +29,9 @@
 class Controller {
 public:
     enum class State : uint8_t {
-        STOPPED,
-        RUNNING
+        STOPPED,        // device closed
+        DEVICE_OPEN,    // device open, not streaming
+        STREAMING       // streaming active
     };
 
     // Sub-state (valid only when State::RUNNING)
@@ -53,6 +54,8 @@ public:
     // ---------- Commands (GUI -> Core thread) ----------
     struct CmdStart {}; //device open, start_streaming(callback), // marker listener 활성화, state = RUNNING
     struct CmdStop {}; //현재 epoch가 있으면 종료, streaming stop, device close, //writer flush, state = STOPPED
+
+
     struct CmdSetRunningMode { RunningMode mode; };
 
     struct CmdSetOutputDir { std::string dir; };
@@ -60,8 +63,14 @@ public:
     struct CmdSaveNow {};                     // Force save current epoch buffer (debug)
     struct CmdClearEpoch {};                  // Clear current epoch buffer
 
+    struct CmdHandleEpoch {
+        std::vector<EEGSample> epoch; // moved from marker thread
+        double ts = 0.0;              // epoch end timestamp (or marker ts)
+    };
+
     using Command = std::variant<
-        CmdStart, CmdStop, CmdSetRunningMode, CmdSetOutputDir, CmdArmRecording, CmdSaveNow, CmdClearEpoch
+        CmdStart, CmdStop, CmdSetRunningMode, CmdSetOutputDir, CmdArmRecording, CmdSaveNow, CmdClearEpoch,
+        CmdHandleEpoch
     >;
 
 public:
@@ -98,12 +107,20 @@ private:
     void do_change_running_mode();
     void do_save_now();
     void do_clear_epoch();
+    // controller.hpp (private에 추가)
+    void do_handle_epoch(std::vector<EEGSample>&& epoch, double ts);
+
 
     // Epoch helpers (thread-safe)
     void start_epoch(double ts); //Purpose: begin an epoch (a “meaningful segment” of EEG) at time ts. 
                                  //Typical trigger: a marker like SPACE_DOWN.
     void end_epoch(double ts); //Purpose: end the epoch at time ts, then hand the collected samples off to saving/inference.
                                //Typical trigger: SPACE_UP marker, or a safety timeout.
+
+    // fixed-length epoch (SPACE_DOWN + 2s)
+    std::atomic<bool> fixed_epoch_armed_{ false };
+    std::atomic<double> fixed_epoch_end_ts_{ 0.0 }; // seconds
+
 
     // Queue
     void enqueue(Command&& cmd); //Purpose: push a command into the command queue safely.

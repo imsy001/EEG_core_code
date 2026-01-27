@@ -4,6 +4,12 @@
 #include <utility>
 #include <algorithm>
 #include <vector>
+#include <chrono>
+
+static double now_steady_seconds() {
+    using namespace std::chrono;
+    return duration<double>(steady_clock::now().time_since_epoch()).count();
+}
 
 #ifdef _WIN32
 #include "LXDeviceAPI.h" // for OpenApi_LXDeviceAPI()
@@ -426,6 +432,19 @@ void EEGGuiApp::draw_ui_() {
         want_quit_ = true;
     }
 
+    ImGui::Separator();
+
+    if (ImGui::Button("Sim SPACE_DOWN (save 2s)", ImVec2(220, 0))) {
+        if (controller_) {
+            const double ts = now_steady_seconds();
+            controller_->on_marker(Marker::SPACE_DOWN, ts);
+            last_status_ = "Simulated SPACE_DOWN: will save 2s epoch";
+        }
+        else {
+            last_error_ = "Controller not initialized";
+        }
+    }
+
     ImGui::EndChild();
 
     ImGui::Dummy(ImVec2(0, pad));
@@ -467,9 +486,20 @@ void EEGGuiApp::draw_ui_() {
     ImGui::RadioButton("Record", &mode, 1); ImGui::SameLine();
     ImGui::RadioButton("Replay", &mode, 2);
 
+    // mode: 0=Idle, 1=Record, 2=Replay (your GUI)
     if (ImGui::Button("Apply Mode", ImVec2(140, 0))) {
-        // TODO
+        if (mode == 1) {
+            controller_->post(Controller::CmdSetRunningMode{ Controller::RunningMode::LABELLING_ONLY });
+            controller_->post(Controller::CmdArmRecording{ true });
+            last_status_ = "Mode: LABELLING_ONLY (saving enabled)";
+        }
+        else {
+            controller_->post(Controller::CmdSetRunningMode{ Controller::RunningMode::INFERENCE_ONLY });
+            controller_->post(Controller::CmdArmRecording{ false });
+            last_status_ = "Mode: INFERENCE_ONLY (saving disabled)";
+        }
     }
+
     ImGui::EndChild();
 
     ImGui::Dummy(ImVec2(0, pad));
@@ -486,8 +516,10 @@ void EEGGuiApp::draw_ui_() {
     ImGui::InputText("File name", out_name, IM_ARRAYSIZE(out_name));
 
     if (ImGui::Button("Apply Path", ImVec2(140, 0))) {
-        last_status_ = std::string("Output set: ") + out_dir + "/" + out_name;
+        controller_->post(Controller::CmdSetOutputDir{ std::string(out_dir) });
+        last_status_ = std::string("Output dir set: ") + out_dir;
     }
+
     ImGui::EndChild();
 
     ImGui::EndChild(); // right_col

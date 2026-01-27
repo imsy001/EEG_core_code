@@ -1,4 +1,4 @@
-/*controller.cpp
+﻿/*controller.cpp
 
 It should handle:
 
@@ -23,6 +23,7 @@ emit_command(Direction::Left)
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iomanip>
 
 namespace {
 void save_epoch_binary(const std::string& output_dir,
@@ -56,13 +57,44 @@ void save_epoch_binary(const std::string& output_dir,
     }
 }
 
+void save_epoch_csv(const std::string& output_dir,
+    const std::vector<EEGSample>& epoch,
+    double ts) {
+    if (output_dir.empty() || epoch.empty()) return;
+
+    std::error_code ec;
+    std::filesystem::create_directories(output_dir, ec);
+    if (ec) return;
+
+    const int chN = (int)epoch.front().channels.size();
+    if (chN <= 0) return;
+
+    const std::string filename = output_dir + "/epoch_" + std::to_string(ts) + ".csv";
+
+    std::ofstream out(filename);
+    if (!out) return;
+
+    // header
+    out << "timestamp_sec";
+    for (int ch = 0; ch < chN; ++ch) out << ",ch" << ch;
+    out << "\n";
+
+    out << std::fixed << std::setprecision(6);
+
+    // rows
+    for (const auto& s : epoch) {
+        out << s.timestamp_sec;
+        for (int ch = 0; ch < chN; ++ch) {
+            out << "," << s.channels[ch];
+        }
+        out << "\n";
+    }
+}
+
 Direction infer_direction_fast(const std::vector<EEGSample>& epoch) {
     if (epoch.empty() || epoch.front().channels.empty()) return Direction::Left;
-
     double acc = 0.0;
-    for (const auto& s : epoch) {
-        acc += s.channels[0];
-    }
+    for (const auto& s : epoch) acc += s.channels[0];
     return acc >= 0.0 ? Direction::Right : Direction::Left;
 }
 } // namespace
@@ -136,6 +168,8 @@ void Controller::process_commands() {
                 do_save_now();
             } else if constexpr (std::is_same_v<T, CmdClearEpoch>) {
                 do_clear_epoch();
+            } else if constexpr (std::is_same_v<T, CmdHandleEpoch>) {
+                do_handle_epoch(std::move(c.epoch), c.ts);
             }
         }, std::move(cmd));
     }
@@ -228,7 +262,6 @@ void Controller::do_change_running_mode() {
 // -------------------- Sample callback thread --------------------
 
 void Controller::on_eeg_sample(const EEGSample& sample) {
-    // Keep callback short. Minimal lock time.
     {
         std::lock_guard<std::mutex> lk(stats_mtx_);
         stats_.samples_total++;
@@ -236,7 +269,26 @@ void Controller::on_eeg_sample(const EEGSample& sample) {
 
     ring_.push(sample);
     epoch_.push(sample);
+
+    // ✅ 고정 길이 epoch: end_ts를 넘는 순간 한 번만 종료
+    if (fixed_epoch_armed_.load(std::memory_order_acquire)) {
+        const double end_ts = fixed_epoch_end_ts_.load(std::memory_order_acquire);
+
+        if (sample.timestamp_sec >= end_ts) {
+            // race 방지: 한 번만 들어오게
+            bool expected = true;
+            if (fixed_epoch_armed_.compare_exchange_strong(
+                expected, false, std::memory_order_acq_rel)) {
+
+                auto to_save = epoch_.end(end_ts, /*min_dur_sec=*/0.0);
+                if (!to_save.empty()) {
+                    post(CmdHandleEpoch{ std::move(to_save), end_ts });
+                }
+            }
+        }
+    }
 }
+
 
 // -------------------- Marker thread --------------------
 
@@ -252,8 +304,6 @@ void Controller::on_marker(Marker marker, double ts) {
 
     if (marker == Marker::SPACE_DOWN) {
         start_epoch(ts);
-    } else if (marker == Marker::SPACE_UP) {
-        end_epoch(ts);
     }
 }
 
@@ -264,44 +314,52 @@ void Controller::start_epoch(double ts) {
 
     // Optional: reflect marker out
     // lsl_.send_marker(Marker::SPACE_DOWN, ts);
+    fixed_epoch_end_ts_.store(ts + 2.0, std::memory_order_release);
+    fixed_epoch_armed_.store(true, std::memory_order_release);
 }
 
 void Controller::end_epoch(double ts) {
-    // EpochBuffer가 lock + active check + min duration check + move-out을 다 해줌
     auto to_save = epoch_.end(ts, config::kMinEpochSeconds);
     if (to_save.empty()) return;
 
-    // 여기부터는 "무거운 일" (저장/추론/라벨링)
-    // 이 함수는 marker thread에서 호출되므로, 여기서 파일 I/O를 하면 marker thread가 막힘.
-    // 가능하면 core thread로 넘기는 구조가 더 좋음(아래 참고).
+    // marker thread에서는 여기서 끝: core thread로 넘김
+    post(CmdHandleEpoch{ std::move(to_save), ts });
+}
 
-    std::cout << "[Controller] epoch ended, samples=" << to_save.size() << "\n";
+void Controller::do_handle_epoch(std::vector<EEGSample>&& epoch, double ts) {
+    std::cout << "[Controller] epoch ended, samples=" << epoch.size() << "\n";
 
     const bool do_label = do_label_.load(std::memory_order_relaxed);
     const bool do_infer = do_infer_.load(std::memory_order_relaxed);
 
     if (do_label) {
-        save_epoch_binary(output_dir_, to_save, ts);
+        // TODO: binary 말고 csv로 저장하려면 여기서 save_epoch_csv(...) 호출
+        save_epoch_binary(output_dir_, epoch, ts);
+        save_epoch_csv(output_dir_, epoch, ts);
     }
 
     if (do_infer && config::kEnableOnlineInference) {
-        const auto dir = infer_direction_fast(to_save);
+        const auto dir = infer_direction_fast(epoch);
         lsl_.send_direction(dir, ts);
     }
-
-    // Optional: reflect marker out (보통은 Unity가 source이므로 필요 없음)
-    // lsl_.send_marker(Marker::SPACE_UP, ts);
 }
+
 
 // -------------------- Save/Epoch (core thread only) --------------------
 void Controller::do_save_now() {
     std::cout << "[Controller] do_save_now() called\n";
-    // Force save current epoch buffer (for debugging)
-    // Note: this may interrupt an ongoing epoch
+
     auto now = std::chrono::steady_clock::now();
     double ts = std::chrono::duration<double>(now.time_since_epoch()).count();
-    end_epoch(ts);
+
+    // core thread에서 epoch 직접 종료 + 데이터 떼오기
+    auto to_save = epoch_.end(ts, config::kMinEpochSeconds);
+    if (to_save.empty()) return;
+
+    // core thread에서 바로 무거운 처리
+    do_handle_epoch(std::move(to_save), ts);
 }
+
 
 // -------------------- Clear/Epoch (core thread only) --------------------
 void Controller::do_clear_epoch() {
