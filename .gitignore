@@ -1,0 +1,87 @@
+############################
+# Build artifacts
+############################
+build/
+bin/
+out/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+Makefile
+
+# Compiled outputs
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.exe
+*.lib
+*.dll
+*.pdb
+*.ilk
+*.exp
+
+############################
+# Logs & runtime output
+############################
+logs/
+*.log
+
+############################
+# EEG data (DO NOT COMMIT)
+############################
+data/
+raw/
+recordings/
+eeg_data/
+
+*.csv
+*.edf
+*.bdf
+*.set
+*.fif
+*.xdf
+
+############################
+# IDE / Editor
+############################
+.vscode/
+.idea/
+*.swp
+*.user
+*.suo
+
+############################
+# OS
+############################
+.DS_Store
+Thumbs.db
+
+############################
+# Python (optional)
+############################
+__pycache__/
+*.pyc
+*.pyo
+.env
+.venv/
+
+############################
+# Third-party libraries
+############################
+external/
+third_party/
+vendor/
+
+# Explicit
+/external/glfw/
+/external/imgui/
+
+############################
+# Visual Studio / MSVC cache (DO NOT COMMIT)
+############################
+.vs/
+*.ipch
+*.VC.db
+*.opendb
