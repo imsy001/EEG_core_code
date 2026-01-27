@@ -105,9 +105,13 @@ Controller::Controller(EEGDevice& device, LSLBridge& lsl)
 }
 
 Controller::~Controller() {
-    // Request stop, then end core loop
-    post(CmdStop{});
+    // 1) 즉시 shutdown (현재 스레드에서 동기 수행)
+    do_device_close();          // 내부에서 streaming이면 stop까지 처리하도록 만들어둠
+
+    // 2) core loop 종료
     core_running_.store(false, std::memory_order_relaxed);
+
+    // 3) join
     if (core_thread_.joinable()) core_thread_.join();
 }
 
@@ -135,9 +139,22 @@ void Controller::core_loop() {
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
 
-    // ensure shutdown even if app exits abruptly
-    do_stop();
+    // ✅ ensure shutdown even if app exits abruptly
+    do_stream_stop();
+    do_device_close();
+
+    // epoch도 안전하게 비우기
+    epoch_.clear();
+
+    {
+        std::lock_guard<std::mutex> lk(stats_mtx_);
+        stats_.device_ok = false;
+        stats_.lsl_ok = false;
+    }
+
+    state_.store(State::STOPPED, std::memory_order_relaxed);
 }
+
 
 void Controller::process_commands() {
     std::queue<Command> local;
@@ -170,17 +187,25 @@ void Controller::process_commands() {
                 do_clear_epoch();
             } else if constexpr (std::is_same_v<T, CmdHandleEpoch>) {
                 do_handle_epoch(std::move(c.epoch), c.ts);
+            } else if constexpr (std::is_same_v< T, CmdDeviceClose>) {
+                do_device_open();
+            } else if constexpr (std::is_same_v<T, CmdDeviceClose>) {
+                do_device_close();
+            } else if constexpr (std::is_same_v<T, CmdStreamStart>) {
+                do_stream_start();
+            } else if constexpr (std::is_same_v<T, CmdStreamStop>) {
+                do_stream_stop();
             }
         }, std::move(cmd));
     }
 }
 
-// -------------------- Start/Stop (core thread only) --------------------
 
-void Controller::do_start() {
+
+// ------------------------Device_open/close---------------------------
+void Controller::do_device_open() {
     if (state_.load(std::memory_order_relaxed) != State::STOPPED) return;
 
-    // 1) open device
     if (!device_.open()) {
         std::lock_guard<std::mutex> lk(stats_mtx_);
         stats_.device_ok = false;
@@ -188,52 +213,25 @@ void Controller::do_start() {
         return;
     }
 
-    // 2) start streaming (non-blocking per your interface contract)
-    const bool ok = device_.start_streaming([this](const EEGSample& s) {
-        this->on_eeg_sample(s);
-    });
-
     {
         std::lock_guard<std::mutex> lk(stats_mtx_);
-        stats_.device_ok = ok && device_.is_streaming();
-        stats_.last_error = ok ? "" : device_.last_error();
-
-        // If you have sample rate in info():
-        // auto inf = device_.info();
-        // stats_.sample_rate_hz = inf.sample_rate_hz;
+        stats_.device_ok = true;
+        stats_.last_error.clear();
     }
 
-    if (!ok) {
-        {
-            std::lock_guard<std::mutex> lk(stats_mtx_);
-            stats_.device_ok = false;
-            stats_.last_error = device_.last_error();
-        }
-        device_.close();
-        return;
-    }
-
-    // Optionally connect marker stream here if LSLBridge supports it
-    // lsl_.connect();
-
-    state_.store(State::RUNNING, std::memory_order_relaxed);
+    state_.store(State::DEVICE_OPEN, std::memory_order_relaxed);
 }
 
-void Controller::do_stop() {
-    if (state_.load(std::memory_order_relaxed) == State::STOPPED) return;
+void Controller::do_device_close() {
+    auto st = state_.load(std::memory_order_relaxed);
+    if (st == State::STOPPED) return;
+
+    if (st == State::STREAMING) {
+        if (device_.is_streaming()) device_.stop_streaming();
+    }
 
     epoch_.clear();
-
-    // Stop streaming
-    if (device_.is_streaming()) {
-        device_.stop_streaming();
-    }
-    if (device_.is_open()) {
-        device_.close();
-    }
-
-    // Optionally disconnect LSL
-    // lsl_.disconnect();
+    if (device_.is_open()) device_.close();
 
     state_.store(State::STOPPED, std::memory_order_relaxed);
 
@@ -244,6 +242,33 @@ void Controller::do_stop() {
     }
 }
 
+
+// ------------------------Stream_start/stop---------------------------
+void Controller::do_stream_start() {
+    if (state_.load(std::memory_order_relaxed) != State::DEVICE_OPEN) return;
+
+    const bool ok = device_.start_streaming([this](const EEGSample& s) {
+        this->on_eeg_sample(s);
+        });
+
+    {
+        std::lock_guard<std::mutex> lk(stats_mtx_);
+        stats_.device_ok = ok && device_.is_streaming();
+        stats_.last_error = ok ? "" : device_.last_error();
+    }
+
+    if (!ok) return;
+    state_.store(State::STREAMING, std::memory_order_relaxed);
+}
+
+void Controller::do_stream_stop() {
+    if (state_.load(std::memory_order_relaxed) != State::STREAMING) return;
+
+    if (device_.is_streaming()) device_.stop_streaming();
+    state_.store(State::DEVICE_OPEN, std::memory_order_relaxed);
+}
+
+//--------------------------Change_mode-----------------------
 void Controller::do_change_running_mode() {
     epoch_.clear();
 
@@ -300,7 +325,7 @@ void Controller::on_marker(Marker marker, double ts) {
 
     if (!config::kUseMarkerEpoching) return;
     if (!armed_.load(std::memory_order_relaxed)) return;
-    if (state_.load(std::memory_order_relaxed) != State::RUNNING) return;
+    if (state_.load(std::memory_order_relaxed) != State::STREAMING) return;
 
     if (marker == Marker::SPACE_DOWN) {
         start_epoch(ts);

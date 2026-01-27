@@ -55,6 +55,10 @@ public:
     struct CmdStart {}; //device open, start_streaming(callback), // marker listener 활성화, state = RUNNING
     struct CmdStop {}; //현재 epoch가 있으면 종료, streaming stop, device close, //writer flush, state = STOPPED
 
+    struct CmdDeviceOpen {};
+    struct CmdDeviceClose {};
+    struct CmdStreamStart {};
+    struct CmdStreamStop {};
 
     struct CmdSetRunningMode { RunningMode mode; };
 
@@ -69,7 +73,8 @@ public:
     };
 
     using Command = std::variant<
-        CmdStart, CmdStop, CmdSetRunningMode, CmdSetOutputDir, CmdArmRecording, CmdSaveNow, CmdClearEpoch,
+        CmdDeviceOpen, CmdDeviceClose, CmdStreamStart, CmdStreamStop,
+        CmdSetRunningMode, CmdSetOutputDir, CmdArmRecording, CmdSaveNow, CmdClearEpoch,
         CmdHandleEpoch
     >;
 
@@ -104,6 +109,12 @@ private:
     // Executed only on core thread
     void do_start();
     void do_stop();
+
+    void do_device_open();
+    void do_device_close();
+    void do_stream_start();
+    void do_stream_stop();
+
     void do_change_running_mode();
     void do_save_now();
     void do_clear_epoch();
