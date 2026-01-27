@@ -215,6 +215,8 @@ bool EEGGuiApp::start_streaming_() {
         const int nch = (int)s.channels.size();
         if (nch <= 0) return;
 
+
+
         {
             std::lock_guard<std::mutex> lk(vis_mu_);
             if (!vis_ready_) return;
@@ -314,7 +316,7 @@ void EEGGuiApp::draw_ui_() {
     ImGui::SliderInt("Plot N", &ui_plot_n_, 100, std::min(1500, vis_capacity_));
 
     // ---- Multi-channel (first K) stacked plots ----
-    const int K = 8;
+    const int K = 6;
     std::vector<float> plots;
     int N = 0;
     int useK = 0;
@@ -350,16 +352,21 @@ void EEGGuiApp::draw_ui_() {
         for (int c = 0; c < useK; ++c) {
             ImGui::PushID(c);
             ImGui::Text("Ch %d", c);
+
+            static float eeg_scale = 100.0f;
+            ImGui::SliderFloat("EEG scale (±uV)", &eeg_scale, 10.0f, 500.0f);
+
             ImGui::PlotLines(
                 "##EEG",
                 &plots[c * N],
                 N,
                 0,
                 nullptr,
-                FLT_MAX,
-                FLT_MAX,
+                -eeg_scale,
+                eeg_scale,
                 ImVec2(0, per_h)
             );
+
             ImGui::PopID();
         }
     }
