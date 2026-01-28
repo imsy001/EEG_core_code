@@ -83,7 +83,7 @@ void save_epoch_csv(const std::string& output_dir,
 
     // rows
     for (const auto& s : epoch) {
-        out << s.timestamp_sec;
+		out << s.timestamp_sec; // timestamp
         for (int ch = 0; ch < chN; ++ch) {
             out << "," << s.channels[ch];
         }
@@ -138,12 +138,10 @@ void Controller::core_loop() {
         process_commands();
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
-
-    // ✅ ensure shutdown even if app exits abruptly
+ 
     do_stream_stop();
     do_device_close();
 
-    // epoch도 안전하게 비우기
     epoch_.clear();
 
     {
@@ -152,7 +150,7 @@ void Controller::core_loop() {
         stats_.lsl_ok = false;
     }
 
-    state_.store(State::STOPPED, std::memory_order_relaxed);
+    state_.store(State::BASE, std::memory_order_relaxed);
 }
 
 
@@ -174,7 +172,9 @@ void Controller::process_commands() {
                 do_start();
             } else if constexpr (std::is_same_v<T, CmdStop>) {
                 do_stop();
-            } else if constexpr (std::is_same_v<T, CmdSetOutputDir>) {
+            } 
+            
+              else if constexpr (std::is_same_v<T, CmdSetOutputDir>) {
                 output_dir_ = std::move(c.dir);
             } else if constexpr (std::is_same_v<T, CmdSetRunningMode>) {
                 mode_ = c.mode;
@@ -187,7 +187,9 @@ void Controller::process_commands() {
                 do_clear_epoch();
             } else if constexpr (std::is_same_v<T, CmdHandleEpoch>) {
                 do_handle_epoch(std::move(c.epoch), c.ts);
-            } else if constexpr (std::is_same_v< T, CmdDeviceClose>) {
+            } 
+            
+              else if constexpr (std::is_same_v< T, CmdDeviceOpen>) {
                 do_device_open();
             } else if constexpr (std::is_same_v<T, CmdDeviceClose>) {
                 do_device_close();
@@ -200,16 +202,53 @@ void Controller::process_commands() {
     }
 }
 
+// Controller.cpp
+std::string Controller::last_status() const {
+    std::lock_guard<std::mutex> lk(status_mtx_);
+    return stats_.last_status;
+}
+std::string Controller::last_error() const {
+    std::lock_guard<std::mutex> lk(status_mtx_);
+    return stats_.last_error;
+}
+
+Controller::Stats Controller::stats() const {
+    std::lock_guard<std::mutex> lk(stats_mtx_);
+    return stats_;   // copy
+}
+bool Controller::is_streaming() const {
+    return state_.load(std::memory_order_relaxed) == State::STREAMING;
+}
+
+
+
 
 
 // ------------------------Device_open/close---------------------------
 void Controller::do_device_open() {
-    if (state_.load(std::memory_order_relaxed) != State::STOPPED) return;
+	auto st = state_.load(std::memory_order_relaxed);
+
+    if (st == State::DEVICE_OPEN) {
+        std::lock_guard<std::mutex> lk(stats_mtx_);
+        stats_.device_ok = true;
+		stats_.last_error.clear();
+		stats_.last_status = "Device already open";
+        return;
+    }
+
+    if (st == State::STREAMING) {
+        std::lock_guard<std::mutex> lk(stats_mtx_);
+        stats_.device_ok = true;
+        stats_.last_error.clear();
+        stats_.last_status = "Cannot open device while streaming";
+        return;
+    }
 
     if (!device_.open()) {
         std::lock_guard<std::mutex> lk(stats_mtx_);
         stats_.device_ok = false;
         stats_.last_error = device_.last_error();
+        stats_.last_status = "Device open failed";
         return;
     }
 
@@ -217,6 +256,7 @@ void Controller::do_device_open() {
         std::lock_guard<std::mutex> lk(stats_mtx_);
         stats_.device_ok = true;
         stats_.last_error.clear();
+        stats_.last_status = "Device opened";
     }
 
     state_.store(State::DEVICE_OPEN, std::memory_order_relaxed);
@@ -224,7 +264,13 @@ void Controller::do_device_open() {
 
 void Controller::do_device_close() {
     auto st = state_.load(std::memory_order_relaxed);
-    if (st == State::STOPPED) return;
+    if (st == State::BASE) {
+        std::lock_guard<std::mutex> lk(stats_mtx_);
+		stats_.device_ok = false;
+		stats_.last_error.clear();
+        stats_.last_status = "Device already closed";
+        return;
+	}
 
     if (st == State::STREAMING) {
         if (device_.is_streaming()) device_.stop_streaming();
@@ -233,40 +279,113 @@ void Controller::do_device_close() {
     epoch_.clear();
     if (device_.is_open()) device_.close();
 
-    state_.store(State::STOPPED, std::memory_order_relaxed);
+    state_.store(State::BASE, std::memory_order_relaxed);
 
     {
         std::lock_guard<std::mutex> lk(stats_mtx_);
         stats_.device_ok = false;
         stats_.lsl_ok = false;
+        stats_.last_error.clear();
+        stats_.last_status = "Device closed";
     }
 }
 
 
 // ------------------------Stream_start/stop---------------------------
 void Controller::do_stream_start() {
-    if (state_.load(std::memory_order_relaxed) != State::DEVICE_OPEN) return;
+    auto st = state_.load(std::memory_order_relaxed);
+
+    if (st == State::STREAMING) {
+        std::lock_guard<std::mutex> lk(stats_mtx_);
+        stats_.last_error.clear();
+        stats_.last_status = "Already streaming";
+        return;
+    }
+
+    // Ensure device is open
+    if (st == State::BASE) {
+        if (!device_.open()) {
+            std::lock_guard<std::mutex> lk(stats_mtx_);
+            stats_.device_ok = false;
+            stats_.last_error = device_.last_error();
+            stats_.last_status = "Device open failed";
+            return;
+        }
+
+        state_.store(State::DEVICE_OPEN, std::memory_order_relaxed);
+        {
+            std::lock_guard<std::mutex> lk(stats_mtx_);
+            stats_.device_ok = true;
+            stats_.last_error.clear();
+            stats_.last_status = "Device opened";
+        }
+    }
+
+    // st is now DEVICE_OPEN (or was already)
+    {
+        std::lock_guard<std::mutex> lk(stats_mtx_);
+        stats_.last_error.clear();
+        stats_.last_status = "Starting streaming...";
+    }
+
+    accepting_.store(true, std::memory_order_release);
 
     const bool ok = device_.start_streaming([this](const EEGSample& s) {
+        if (!accepting_.load(std::memory_order_acquire)) return;
+
+        // 1) core pipeline
         this->on_eeg_sample(s);
+
+        // 2) controller-owned visualization ring
+        this->push_vis_sample_(s);
         });
+
+    if (!ok) {
+        accepting_.store(false, std::memory_order_release);
+
+        std::lock_guard<std::mutex> lk(stats_mtx_);
+        stats_.last_error = device_.last_error();
+        stats_.last_status = "start_streaming() failed";
+        return;
+    }
+
+    state_.store(State::STREAMING, std::memory_order_relaxed);
 
     {
         std::lock_guard<std::mutex> lk(stats_mtx_);
-        stats_.device_ok = ok && device_.is_streaming();
-        stats_.last_error = ok ? "" : device_.last_error();
+        stats_.last_error.clear();
+        stats_.last_status = "Streaming started";
+        // stats_.lsl_ok = true; // only if you actually start LSL here
     }
-
-    if (!ok) return;
-    state_.store(State::STREAMING, std::memory_order_relaxed);
 }
+
 
 void Controller::do_stream_stop() {
-    if (state_.load(std::memory_order_relaxed) != State::STREAMING) return;
+    auto st = state_.load(std::memory_order_relaxed);
 
-    if (device_.is_streaming()) device_.stop_streaming();
+    if (st != State::STREAMING) {
+        std::lock_guard<std::mutex> lk(stats_mtx_);
+        stats_.last_error.clear();
+        stats_.last_status = "Not streaming";
+        return;
+    }
+
+    // Stop accepting samples first (important: callback thread gate)
+    accepting_.store(false, std::memory_order_release);
+
+    if (device_.is_streaming()) {
+        device_.stop_streaming(); // if this can fail, capture device_.last_error()
+    }
+
     state_.store(State::DEVICE_OPEN, std::memory_order_relaxed);
+
+    {
+        std::lock_guard<std::mutex> lk(stats_mtx_);
+        stats_.last_error.clear();
+        stats_.last_status = "Streaming stopped";
+    }
 }
+
 
 //--------------------------Change_mode-----------------------
 void Controller::do_change_running_mode() {
@@ -313,6 +432,28 @@ void Controller::on_eeg_sample(const EEGSample& sample) {
         }
     }
 }
+
+//-------------------- Visualization ring buffer --------------------
+void Controller::push_vis_sample_(const EEGSample& s) {
+    const int nch = static_cast<int>(s.channels.size());
+    if (nch <= 0) return;
+
+    std::lock_guard<std::mutex> lk(vis_mtx_);
+    if (!vis_ready_) return;
+
+    if (nch != vis_nch_) {
+        vis_nch_ = nch;
+        vis_ring_.assign(vis_capacity_ * vis_nch_, 0.0f);
+        vis_write_ = 0;
+    }
+
+    float* dst = &vis_ring_[vis_write_ * vis_nch_];
+    for (int c = 0; c < vis_nch_; ++c)
+        dst[c] = s.channels[c];
+
+    vis_write_ = (vis_write_ + 1) % vis_capacity_;
+}
+
 
 
 // -------------------- Marker thread --------------------
@@ -369,6 +510,28 @@ void Controller::do_handle_epoch(std::vector<EEGSample>&& epoch, double ts) {
     }
 }
 
+void Controller::do_save_epoch(std::vector<EEGSample>&& epoch, double ts) {
+	std::cout << "[Controller] do_save_epoch() called, samples=" << epoch.size() << "\n";
+
+	const bool do_label = do_label_.load(std::memory_order_relaxed);
+
+    if (do_label) {
+        save_epoch_binary(output_dir_, epoch, ts);
+        save_epoch_csv(output_dir_, epoch, ts);
+    }
+}
+
+void Controller::do_infer_epoch(const std::vector<EEGSample>&& epoch, double ts) {
+	std::cout << "[Controller] do_infer_epoch() called, samples=" << epoch.size() << "\n";
+    const bool do_infer = do_infer_.load(std::memory_order_relaxed);
+    if (do_infer && config::kEnableOnlineInference) {
+        const auto dir = infer_direction_fast(epoch);
+        lsl_.send_direction(dir, ts);
+	}
+
+}
+    
+
 
 // -------------------- Save/Epoch (core thread only) --------------------
 void Controller::do_save_now() {
@@ -382,7 +545,7 @@ void Controller::do_save_now() {
     if (to_save.empty()) return;
 
     // core thread에서 바로 무거운 처리
-    do_handle_epoch(std::move(to_save), ts);
+    do_save_epoch(std::move(to_save), ts);
 }
 
 

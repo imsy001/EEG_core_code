@@ -29,7 +29,7 @@
 class Controller {
 public:
     enum class State : uint8_t {
-        STOPPED,        // device closed
+        BASE,        // device closed
         DEVICE_OPEN,    // device open, not streaming
         STREAMING       // streaming active
     };
@@ -49,11 +49,16 @@ public:
         bool device_ok = false;
         bool lsl_ok = false;
         std::string last_error;
+        std::string last_status;
     };
+
+    Stats stats() const;     // 👈 snapshot getter
+    bool is_streaming() const;
+
 
     // ---------- Commands (GUI -> Core thread) ----------
     struct CmdStart {}; //device open, start_streaming(callback), // marker listener 활성화, state = RUNNING
-    struct CmdStop {}; //현재 epoch가 있으면 종료, streaming stop, device close, //writer flush, state = STOPPED
+    struct CmdStop {}; //현재 epoch가 있으면 종료, streaming stop, device close, //writer flush, state = BASE
 
     struct CmdDeviceOpen {};
     struct CmdDeviceClose {};
@@ -79,6 +84,10 @@ public:
     >;
 
 public:
+    std::string last_status() const;
+    std::string last_error()  const;
+
+public:
     Controller(EEGDevice& device, LSLBridge& lsl);
     ~Controller();
 
@@ -97,9 +106,35 @@ public:
     // Provide timestamp_sec if you have it; otherwise pass host time.
     void on_marker(Marker marker, double timestamp_sec);
 
+public:
+    // Visualization ring buffer (GUI thread)
+    struct VisSnapshot {
+        int nch;
+        int capacity;
+        int write;
+        std::vector<float> ring;
+    };
+
+    VisSnapshot Controller::vis_snapshot() const {
+        std::lock_guard<std::mutex> lk(vis_mtx_);
+        return { vis_nch_, vis_capacity_, vis_write_, vis_ring_ };
+    }
+
+
 private:
     RingBuffer ring_{4096};   // display용
     EpochBuffer epoch_;       // SPACE_DOWN~UP
+
+private:
+    // visualization ring buffer
+    mutable std::mutex vis_mtx_;
+    std::vector<float> vis_ring_;
+    int vis_nch_ = 0;
+    int vis_capacity_ = 0;
+    int vis_write_ = 0;
+    bool vis_ready_ = false;
+
+    void push_vis_sample_(const EEGSample& s);
 
 private:
     // Core thread loop
@@ -120,7 +155,8 @@ private:
     void do_clear_epoch();
     // controller.hpp (private에 추가)
     void do_handle_epoch(std::vector<EEGSample>&& epoch, double ts);
-
+	void do_save_epoch(std::vector<EEGSample>&& epoch, double ts);
+	void do_infer_epoch(const std::vector<EEGSample>&& epoch, double ts);
 
     // Epoch helpers (thread-safe)
     void start_epoch(double ts); //Purpose: begin an epoch (a “meaningful segment” of EEG) at time ts. 
@@ -149,10 +185,17 @@ private:
     std::queue<Command> cmd_q_;
 
     // State
-    std::atomic<State> state_{State::STOPPED};
+    std::atomic<State> state_{State::BASE};
     RunningMode mode_ = RunningMode::INFERENCE_ONLY;
     std::atomic<bool> do_label_{false};
     std::atomic<bool> do_infer_{true};
+
+    mutable std::mutex status_mtx_;
+    std::string last_status_;
+    std::string last_error_;
+
+	// Device callback thread
+    std::atomic<bool> accepting_{ false };
 
     // Config/state
     std::string output_dir_;

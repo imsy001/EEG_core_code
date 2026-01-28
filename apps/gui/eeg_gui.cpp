@@ -132,23 +132,6 @@ bool EEGGuiApp::open_api_() {
     last_status_ = "API open failed";
     return false;
 #else
-    ::OpenApi_LXDeviceAPI(1, 0, 0);
-    api_opened_ = true;
-    last_status_ = "API opened";
-    last_error_.clear();
-    return true;
-#endif
-}
-
-// ----------------------
-// Device open
-// ----------------------
-bool EEGGuiApp::open_device_() {
-    if (dev_ && dev_->is_open()) {
-        last_status_ = "Device already open";
-        return true;
-    }
-
     // Build device + controller once
     if (!dev_) {
         LXConfig cfg;
@@ -161,14 +144,28 @@ bool EEGGuiApp::open_device_() {
         controller_ = std::make_unique<Controller>(*dev_, *lsl_);
     }
 
-    if (!dev_->open()) {
-        last_error_ = dev_->last_error();
-        last_status_ = "device open() failed";
-        return false;
-    }
-
-    last_status_ = "Device opened";
+    ::OpenApi_LXDeviceAPI(1, 0, 0);
+    api_opened_ = true;
+    last_status_ = "API opened";
     last_error_.clear();
+    return true;
+#endif
+}
+
+// ----------------------
+// Device open/close
+// ----------------------
+bool EEGGuiApp::open_device_() {
+	last_error_.clear();
+	last_status_ = "Opening device...";
+    controller_->post(Controller::CmdDeviceOpen{});
+    return true;
+}
+
+bool EEGGuiApp::close_device_() {
+    last_error_.clear();
+    last_status_ = "Closing device...";
+    controller_->post(Controller::CmdDeviceClose{});
     return true;
 }
 
@@ -176,104 +173,36 @@ bool EEGGuiApp::open_device_() {
 // Streaming start/stop
 // ----------------------
 bool EEGGuiApp::start_streaming_() {
-    if (streaming_.load(std::memory_order_acquire)) {
-        last_status_ = "Already streaming";
-        return true;
-    }
-
-    // Ensure device/controller exist
-    if (!dev_) {
-        LXConfig cfg;
-        cfg.lx_device_id = lx_device_id_;
-        cfg.numsample_return = numsample_return_;
-        cfg.num_channels = num_channels_;
-
-        dev_ = make_lx_device(cfg);
-        lsl_ = std::make_unique<DummyLSLBridge>();
-        controller_ = std::make_unique<Controller>(*dev_, *lsl_);
-    }
-
-    {
-        std::lock_guard<std::mutex> lk(vis_mu_);
-        vis_nch_ = num_channels_;
-        vis_ring_.assign(vis_capacity_ * vis_nch_, 0.0f);
-        vis_write_ = 0;
-        vis_ready_ = true;
-        ui_channel_ = 0;
-    }
-
-    if (!dev_->open()) {
-        last_error_ = dev_->last_error();
-        last_status_ = "open() failed";
-        return false;
-    }
-
-    accepting_.store(true, std::memory_order_release);
-
-    const bool ok = dev_->start_streaming([this](const EEGSample& s) {
-        // device callback thread
-        if (!accepting_.load(std::memory_order_acquire)) return;
-
-        // 1) core pipeline
-        controller_->on_eeg_sample(s);
-
-        // 2) GUI visualization ring
-        const int nch = (int)s.channels.size();
-        if (nch <= 0) return;
-
-
-
-        {
-            std::lock_guard<std::mutex> lk(vis_mu_);
-            if (!vis_ready_) return;
-
-            // If device reports a different channel count than expected:
-            if (nch != vis_nch_) {
-                vis_nch_ = nch;
-                vis_ring_.assign(vis_capacity_ * vis_nch_, 0.0f);
-                vis_write_ = 0;
-                ui_channel_ = 0;
-            }
-
-            float* dst = &vis_ring_[vis_write_ * vis_nch_];
-            for (int c = 0; c < vis_nch_; ++c) dst[c] = s.channels[c];
-
-            vis_write_ = (vis_write_ + 1) % vis_capacity_;
-        }
-        });
-
-    if (!ok) {
-        last_error_ = dev_->last_error();
-        last_status_ = "start_streaming() failed";
-        accepting_.store(false, std::memory_order_release);
-        dev_->close();
-        return false;
-    }
-
-    streaming_.store(true, std::memory_order_release);
-    last_status_ = "Streaming started";
+    
     last_error_.clear();
+    last_status_ = "Starting streaming...";
+    controller_->post(Controller::CmdStreamStart{});   
     return true;
 }
 
 void EEGGuiApp::stop_streaming_() {
-    if (!streaming_.load(std::memory_order_acquire)) return;
-
-    accepting_.store(false, std::memory_order_release);
-
-    if (dev_) {
-        dev_->stop_streaming();
-        dev_->close();
+    last_error_.clear();
+    last_status_ = "Stopping streaming...";
+    if (controller_) {
+        controller_->post(Controller::CmdStreamStop{});
     }
-
-    streaming_.store(false, std::memory_order_release);
-    last_status_ = "Streaming stopped";
+    else {
+        last_error_ = "Controller not initialized";
+        last_status_ = "Stop failed";
+    }
 }
 
 // ----------------------
 // UI
 // ----------------------
 void EEGGuiApp::draw_ui_() {
+
+    if (controller_) {
+        const auto st = controller_->stats();  // you already have stats_ + mutex
+        last_status_ = st.last_status;
+        last_error_ = st.last_error;
+    }
+
     // Fullscreen root window
     ImGuiIO& io = ImGui::GetIO();
     ImGui::SetNextWindowPos(ImVec2(0, 0));
@@ -310,16 +239,26 @@ void EEGGuiApp::draw_ui_() {
     }
 
     float full_h = avail.y;
-
     // =========================================================
     // LEFT : EEG DISPLAY
+    //   - Uses Controller-owned visualization ring buffer via vis_snapshot()
     // =========================================================
     ImGui::BeginChild("eeg_display", ImVec2(left_w, full_h), true);
     ImGui::Text("eeg_display");
     ImGui::Separator();
 
     ImGui::Text("Waveform");
-    ImGui::SliderInt("Plot N", &ui_plot_n_, 100, std::min(1500, vis_capacity_));
+
+    // Pull a snapshot from Controller (thread-safe copy)
+    Controller::VisSnapshot snap{};
+    if (controller_) {
+        snap = controller_->vis_snapshot();
+    }
+
+
+    // Slider max should follow snapshot capacity (fallback to 1500 if empty)
+    const int maxPlotN = (snap.capacity > 0) ? std::min(1500, snap.capacity) : 1500;
+    ImGui::SliderInt("Plot N", &ui_plot_n_, 100, maxPlotN);
 
     // ---- Multi-channel (first K) stacked plots ----
     const int K = 6;
@@ -327,23 +266,23 @@ void EEGGuiApp::draw_ui_() {
     int N = 0;
     int useK = 0;
 
-    {
-        std::lock_guard<std::mutex> lk(vis_mu_);
-        if (vis_ready_ && !vis_ring_.empty() && vis_nch_ > 0) {
-            N = std::min(ui_plot_n_, vis_capacity_);
-            useK = std::min(K, vis_nch_);
-            plots.assign(useK * N, 0.0f);
+    // Build plot buffers from snapshot
+    if (snap.nch > 0 && snap.capacity > 0 && !snap.ring.empty()) {
+        N = std::min(ui_plot_n_, snap.capacity);
+        useK = std::min(K, snap.nch);
 
-            const int w = vis_write_;
-            for (int i = 0; i < N; ++i) {
-                int idx = w - N + i;
-                while (idx < 0) idx += vis_capacity_;
-                idx %= vis_capacity_;
+        plots.assign(useK * N, 0.0f);
 
-                const float* src = &vis_ring_[idx * vis_nch_];
-                for (int c = 0; c < useK; ++c) {
-                    plots[c * N + i] = src[c];
-                }
+        const int w = snap.write;
+
+        for (int i = 0; i < N; ++i) {
+            int idx = w - N + i;
+            while (idx < 0) idx += snap.capacity;
+            idx %= snap.capacity;
+
+            const float* src = &snap.ring[idx * snap.nch];
+            for (int c = 0; c < useK; ++c) {
+                plots[c * N + i] = src[c];
             }
         }
     }
@@ -353,14 +292,15 @@ void EEGGuiApp::draw_ui_() {
     }
     else {
         float avail_h = ImGui::GetContentRegionAvail().y;
-        float per_h = std::max(50.0f, (avail_h - 40.0f) / (float)useK);
+        float per_h = std::max(50.0f, (avail_h - 20.0f) / (float)useK);
+
+        // One shared scale slider (not repeated per channel)
+        static float eeg_scale = 100.0f;
+        ImGui::SliderFloat("EEG scale (±uV)", &eeg_scale, 10.0f, 500.0f);
 
         for (int c = 0; c < useK; ++c) {
             ImGui::PushID(c);
             ImGui::Text("Ch %d", c);
-
-            static float eeg_scale = 100.0f;
-            ImGui::SliderFloat("EEG scale (±uV)", &eeg_scale, 10.0f, 500.0f);
 
             ImGui::PlotLines(
                 "##EEG",
@@ -378,8 +318,8 @@ void EEGGuiApp::draw_ui_() {
     }
 
     ImGui::EndChild();
-
     ImGui::SameLine(0.0f, pad);
+
 
     // =========================================================
     // RIGHT : CONTROL PANELS
@@ -397,7 +337,7 @@ void EEGGuiApp::draw_ui_() {
     ImGui::BeginChild("status_panel", ImVec2(0, h_state), true);
     ImGui::Text("status_panel");
     ImGui::Separator();
-    ImGui::Text("EEG: %s", streaming_.load() ? "STREAMING" : "STOPPED");
+    ImGui::Text("EEG: %s", (controller_ ? "READY" : "NOT INITIALIZED"));
     if (!last_status_.empty()) ImGui::Text("Message: %s", last_status_.c_str());
     if (!last_error_.empty())  ImGui::Text("Error: %s", last_error_.c_str());
     ImGui::EndChild();
@@ -416,7 +356,9 @@ void EEGGuiApp::draw_ui_() {
         open_device_();
     }
 
-    if (!streaming_.load(std::memory_order_acquire)) {
+    const bool isStreaming = controller_ ? controller_->is_streaming() : false;
+
+    if (!isStreaming) {
         if (ImGui::Button("Start Streaming", ImVec2(180, 0))) {
             start_streaming_();
         }
@@ -426,6 +368,7 @@ void EEGGuiApp::draw_ui_() {
             stop_streaming_();
         }
     }
+
 
     ImGui::SameLine();
     if (ImGui::Button("Quit", ImVec2(120, 0))) {

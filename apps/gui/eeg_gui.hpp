@@ -29,9 +29,10 @@ private:
     bool api_opened_ = false;
     bool open_api_();
 
-    // device open
+    // device open/close
     bool device_opened_ = false;
     bool open_device_();
+	bool close_device_();
     
 
     // streaming control
