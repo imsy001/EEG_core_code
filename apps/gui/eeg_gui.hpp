@@ -34,10 +34,11 @@ private:
     bool open_device_();
 	bool close_device_();
     
-
     // streaming control
     bool start_streaming_();
     void stop_streaming_();
+
+	// armed epoching control
 
     // per-frame
     void draw_ui_();
@@ -64,6 +65,10 @@ private:
 
     std::string last_status_;
     std::string last_error_;
+
+    std::string gui_status_;   // what the user just did
+    std::string gui_error_;    // GUI-side errors (not controller errors)
+
 
 private:
     // ---- GUI ring buffer ----

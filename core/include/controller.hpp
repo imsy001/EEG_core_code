@@ -10,6 +10,8 @@
 #include <thread>
 #include <variant>
 #include <vector>
+#include <condition_variable>
+#include <memory>
 
 #include "types.hpp"
 #include "config.hpp"
@@ -57,8 +59,8 @@ public:
 
 
     // ---------- Commands (GUI -> Core thread) ----------
-    struct CmdStart {}; //device open, start_streaming(callback), // marker listener 활성화, state = RUNNING
-    struct CmdStop {}; //현재 epoch가 있으면 종료, streaming stop, device close, //writer flush, state = BASE
+    struct CmdStart {}; //have to decide....
+    struct CmdStop {}; // SHUTDOWN: terminate core thread, stop streaming, close device
 
     struct CmdDeviceOpen {};
     struct CmdDeviceClose {};
@@ -69,18 +71,24 @@ public:
 
     struct CmdSetOutputDir { std::string dir; };
     struct CmdArmRecording { bool armed; };   // marker epoching을 “켜거나 끄라” armed = true → SPACE_DOWN/UP 반응 armed = false → marker 무시
-    struct CmdSaveNow {};                     // Force save current epoch buffer (debug)
     struct CmdClearEpoch {};                  // Clear current epoch buffer
 
-    struct CmdHandleEpoch {
-        std::vector<EEGSample> epoch; // moved from marker thread
-        double ts = 0.0;              // epoch end timestamp (or marker ts)
+    struct CmdSaveEpoch {
+        std::shared_ptr<const std::vector<EEGSample>> epoch;
+        double ts = 0.0;
     };
 
-    using Command = std::variant<
+    struct CmdInferEpoch {
+        std::shared_ptr<const std::vector<EEGSample>> epoch;
+        double ts = 0.0;
+    };
+
+
+
+    using Command = std::variant<CmdStart, CmdStop,
         CmdDeviceOpen, CmdDeviceClose, CmdStreamStart, CmdStreamStop,
-        CmdSetRunningMode, CmdSetOutputDir, CmdArmRecording, CmdSaveNow, CmdClearEpoch,
-        CmdHandleEpoch
+        CmdSetRunningMode, CmdSetOutputDir, CmdArmRecording, CmdClearEpoch,
+		CmdSaveEpoch, CmdInferEpoch
     >;
 
 public:
@@ -96,7 +104,7 @@ public:
 
     // GUI-safe reads
     State get_state() const noexcept { return state_.load(std::memory_order_relaxed); }
-    RunningMode get_RunningMode() const;
+    RunningMode get_running_mode() const;
     Stats get_stats() const;
 
     // Called by device streaming callback thread (real-time-ish)
@@ -115,7 +123,7 @@ public:
         std::vector<float> ring;
     };
 
-    VisSnapshot Controller::vis_snapshot() const {
+    VisSnapshot vis_snapshot() const {
         std::lock_guard<std::mutex> lk(vis_mtx_);
         return { vis_nch_, vis_capacity_, vis_write_, vis_ring_ };
     }
@@ -151,12 +159,11 @@ private:
     void do_stream_stop();
 
     void do_change_running_mode();
-    void do_save_now();
     void do_clear_epoch();
     // controller.hpp (private에 추가)
-    void do_handle_epoch(std::vector<EEGSample>&& epoch, double ts);
-	void do_save_epoch(std::vector<EEGSample>&& epoch, double ts);
-	void do_infer_epoch(const std::vector<EEGSample>&& epoch, double ts);
+    void do_save_epoch(std::shared_ptr<const std::vector<EEGSample>> epoch, double ts);
+    void do_infer_epoch(std::shared_ptr<const std::vector<EEGSample>> epoch, double ts);
+
 
     // Epoch helpers (thread-safe)
     void start_epoch(double ts); //Purpose: begin an epoch (a “meaningful segment” of EEG) at time ts. 
@@ -184,17 +191,15 @@ private:
     mutable std::mutex cmd_mtx_;
     std::queue<Command> cmd_q_;
 
+    std::condition_variable cmd_cv_;
+
     // State
     std::atomic<State> state_{State::BASE};
-    RunningMode mode_ = RunningMode::INFERENCE_ONLY;
+    std::atomic<RunningMode> mode_{ RunningMode::INFERENCE_ONLY };
     std::atomic<bool> do_label_{false};
     std::atomic<bool> do_infer_{true};
 
-    mutable std::mutex status_mtx_;
-    std::string last_status_;
-    std::string last_error_;
-
-	// Device callback thread
+    // Device callback thread
     std::atomic<bool> accepting_{ false };
 
     // Config/state

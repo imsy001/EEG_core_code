@@ -62,7 +62,7 @@ EEGGuiApp::~EEGGuiApp() {
 // ----------------------
 bool EEGGuiApp::init_window_and_imgui_() {
     if (!glfwInit()) {
-        last_error_ = "glfwInit() failed";
+        gui_error_ = "glfwInit() failed";
         return false;
     }
 
@@ -76,7 +76,7 @@ bool EEGGuiApp::init_window_and_imgui_() {
 
     impl_->window = glfwCreateWindow(1100, 700, "eeg_gui", nullptr, nullptr);
     if (!impl_->window) {
-        last_error_ = "glfwCreateWindow() failed";
+        gui_error_ = "glfwCreateWindow() failed";
         glfwTerminate();
         return false;
     }
@@ -92,16 +92,16 @@ bool EEGGuiApp::init_window_and_imgui_() {
     ImGui::StyleColorsDark();
 
     if (!ImGui_ImplGlfw_InitForOpenGL(impl_->window, true)) {
-        last_error_ = "ImGui_ImplGlfw_InitForOpenGL() failed";
+        gui_error_ = "ImGui_ImplGlfw_InitForOpenGL() failed";
         return false;
     }
     if (!ImGui_ImplOpenGL3_Init(impl_->glsl_version)) {
-        last_error_ = "ImGui_ImplOpenGL3_Init() failed";
+        gui_error_ = "ImGui_ImplOpenGL3_Init() failed";
         return false;
     }
 
-    last_status_ = "GUI initialized";
-    last_error_.clear();
+    gui_status_ = "GUI initialized";
+    gui_error_.clear();
     return true;
 }
 
@@ -123,13 +123,15 @@ void EEGGuiApp::shutdown_window_and_imgui_() {
 // ----------------------
 bool EEGGuiApp::open_api_() {
     if (api_opened_) {
-        last_status_ = "API already opened";
+        gui_status_ = "GUI: API already opened";
+        gui_error_.clear();
         return true;
     }
 
+
 #ifndef _WIN32
-    last_error_ = "OpenApi_LXDeviceAPI is Windows-only in this build.";
-    last_status_ = "API open failed";
+    gui_error_ = "OpenApi_LXDeviceAPI is Windows-only in this build.";
+    gui_status_ = "API open failed";
     return false;
 #else
     // Build device + controller once
@@ -146,9 +148,22 @@ bool EEGGuiApp::open_api_() {
 
     ::OpenApi_LXDeviceAPI(1, 0, 0);
     api_opened_ = true;
-    last_status_ = "API opened";
-    last_error_.clear();
+
+    if (!dev_) {
+        LXConfig cfg;
+        cfg.lx_device_id = lx_device_id_;
+        cfg.numsample_return = numsample_return_;
+        cfg.num_channels = num_channels_;
+
+        dev_ = make_lx_device(cfg);
+        lsl_ = std::make_unique<DummyLSLBridge>();
+        controller_ = std::make_unique<Controller>(*dev_, *lsl_);
+    }
+
+    gui_status_ = "GUI: API opened";
+    gui_error_.clear();
     return true;
+
 #endif
 }
 
@@ -156,39 +171,60 @@ bool EEGGuiApp::open_api_() {
 // Device open/close
 // ----------------------
 bool EEGGuiApp::open_device_() {
-	last_error_.clear();
-	last_status_ = "Opening device...";
+    if (!open_api_()) return false;
+    if (!controller_) {
+        gui_error_ = "Controller not initialized (Open API failed?)";
+        gui_status_.clear();
+        return false;
+    }
     controller_->post(Controller::CmdDeviceOpen{});
+    gui_status_ = "GUI: Open Device requested";
+    gui_error_.clear();
     return true;
 }
 
+
 bool EEGGuiApp::close_device_() {
-    last_error_.clear();
-    last_status_ = "Closing device...";
+    if (!open_api_()) return false;
+    if (!controller_) {
+        gui_error_ = "Controller not initialized (Open API failed?)";
+        gui_status_.clear();
+        return false;
+    }
     controller_->post(Controller::CmdDeviceClose{});
+    gui_status_ = "GUI: Close Device requested";
+    gui_error_.clear();
     return true;
 }
+
 
 // ----------------------
 // Streaming start/stop
 // ----------------------
 bool EEGGuiApp::start_streaming_() {
-    
-    last_error_.clear();
-    last_status_ = "Starting streaming...";
-    controller_->post(Controller::CmdStreamStart{});   
+    if (!open_api_()) return false;
+    if (!controller_) {
+        gui_error_ = "Controller not initialized (Open API failed?)";
+        gui_status_.clear();
+        return false;
+    }
+    controller_->post(Controller::CmdStreamStart{});
+    gui_status_ = "GUI: Start Streaming requested";
+    gui_error_.clear();
     return true;
 }
 
+
 void EEGGuiApp::stop_streaming_() {
-    last_error_.clear();
-    last_status_ = "Stopping streaming...";
+    gui_status_ = "GUI: Stop Streaming requested";
+    gui_error_.clear();
+
     if (controller_) {
         controller_->post(Controller::CmdStreamStop{});
     }
     else {
-        last_error_ = "Controller not initialized";
-        last_status_ = "Stop failed";
+        gui_error_ = "GUI Error: Controller not initialized (Open API first)";
+        gui_status_.clear();
     }
 }
 
@@ -196,11 +232,13 @@ void EEGGuiApp::stop_streaming_() {
 // UI
 // ----------------------
 void EEGGuiApp::draw_ui_() {
+	// Pull stats from Controller
+    Controller::Stats ctrl{};
+    bool has_ctrl = false;
 
     if (controller_) {
-        const auto st = controller_->stats();  // you already have stats_ + mutex
-        last_status_ = st.last_status;
-        last_error_ = st.last_error;
+        ctrl = controller_->stats();
+        has_ctrl = true;
     }
 
     // Fullscreen root window
@@ -326,7 +364,7 @@ void EEGGuiApp::draw_ui_() {
     // =========================================================
     ImGui::BeginChild("right_col", ImVec2(right_w, full_h), false);
 
-    const float h_state = 80.0f;
+    const float h_state = 120.0f;
     const float h_eeg_btn = 95.0f;
     const float h_log = 120.0f;
     const float h_unity = 120.0f;
@@ -335,14 +373,39 @@ void EEGGuiApp::draw_ui_() {
 
     // ---------- status ----------
     ImGui::BeginChild("status_panel", ImVec2(0, h_state), true);
-    ImGui::Text("status_panel");
+    ImGui::Text("Status");
     ImGui::Separator();
-    ImGui::Text("EEG: %s", (controller_ ? "READY" : "NOT INITIALIZED"));
-    if (!last_status_.empty()) ImGui::Text("Message: %s", last_status_.c_str());
-    if (!last_error_.empty())  ImGui::Text("Error: %s", last_error_.c_str());
-    ImGui::EndChild();
 
+    // ---- GUI messages ----
+    if (!gui_status_.empty())
+        ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f),
+            "GUI: %s", gui_status_.c_str());
+
+    if (!gui_error_.empty())
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.5f, 1.0f),
+            "GUI Error: %s", gui_error_.c_str());
+
+    // ---- Controller truth ----
+    if (has_ctrl) {
+        if (!ctrl.last_status.empty())
+            ImGui::Text("Core: %s", ctrl.last_status.c_str());
+
+        if (!ctrl.last_error.empty())
+            ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f),
+                "Core Error: %s", ctrl.last_error.c_str());
+
+        ImGui::Text("Core state: %s",
+            controller_->is_streaming() ? "STREAMING" : "NOT STREAMING");
+    }
+    else {
+        ImGui::TextDisabled("Core: not initialized");
+    }
+
+
+    ImGui::EndChild();
     ImGui::Dummy(ImVec2(0, pad));
+
+
 
     // ---------- EEG control ----------
     ImGui::BeginChild("eeg_button", ImVec2(0, h_eeg_btn), true);
@@ -376,17 +439,30 @@ void EEGGuiApp::draw_ui_() {
     }
 
     ImGui::Separator();
-
     if (ImGui::Button("Sim SPACE_DOWN (save 2s)", ImVec2(220, 0))) {
-        if (controller_) {
-            const double ts = now_steady_seconds();
-            controller_->on_marker(Marker::SPACE_DOWN, ts);
-            last_status_ = "Simulated SPACE_DOWN: will save 2s epoch";
+        if (!controller_) {
+            gui_error_ = "GUI Error: Controller not initialized (Open API first)";
+            gui_status_.clear();
+        }
+        else if (!controller_->is_streaming()) {
+            gui_error_ = "Core is NOT STREAMING. Start streaming first.";
+            gui_status_.clear();
         }
         else {
-            last_error_ = "Controller not initialized";
+            const double ts = now_steady_seconds();
+
+            // This triggers:
+            // - epoch_.start(ts)
+            // - fixed_epoch_end_ts_ = ts + 2.0
+            // - fixed_epoch_armed_ = true
+            // Then on_eeg_sample() will auto end at ts+2.0 and post CmdSaveEpoch/CmdInferEpoch
+            controller_->on_marker(Marker::SPACE_DOWN, ts);
+
+            gui_status_ = "GUI: Simulated SPACE_DOWN (will auto-save 2.0s epoch)";
+            gui_error_.clear();
         }
     }
+
 
     ImGui::EndChild();
 
@@ -421,27 +497,40 @@ void EEGGuiApp::draw_ui_() {
 
     // ---------- mode panel ----------
     ImGui::BeginChild("mode_panel", ImVec2(0, h_mode), true);
-    ImGui::Text("mode 설정 button");
+    ImGui::Text("mode setting button");
     ImGui::Separator();
 
     static int mode = 0;
-    ImGui::RadioButton("Idle", &mode, 0); ImGui::SameLine();
-    ImGui::RadioButton("Record", &mode, 1); ImGui::SameLine();
-    ImGui::RadioButton("Replay", &mode, 2);
+    ImGui::RadioButton("Labeling Only", &mode, 0); ImGui::SameLine();
+    ImGui::RadioButton("Inference Only", &mode, 1); ImGui::SameLine();
+    ImGui::RadioButton("Inference and Labeling", &mode, 2);
 
-    // mode: 0=Idle, 1=Record, 2=Replay (your GUI)
+    // mode: 0=Labeling Only, 1=Inference Only, 2=Inference and Labeling (your GUI)
     if (ImGui::Button("Apply Mode", ImVec2(140, 0))) {
-        if (mode == 1) {
-            controller_->post(Controller::CmdSetRunningMode{ Controller::RunningMode::LABELLING_ONLY });
-            controller_->post(Controller::CmdArmRecording{ true });
-            last_status_ = "Mode: LABELLING_ONLY (saving enabled)";
+        if (!controller_) {
+            gui_error_ = "Controller not initialized (Open API first)";
+            gui_status_.clear();
+        }
+        else if (mode == 0) {
+            controller_->post(Controller::CmdSetRunningMode{
+                Controller::RunningMode::LABELLING_ONLY });
+            gui_status_ = "GUI: Mode set to LABELLING_ONLY";
+            gui_error_.clear();
+        }
+        else if (mode == 1) {
+            controller_->post(Controller::CmdSetRunningMode{
+                Controller::RunningMode::INFERENCE_ONLY });
+            gui_status_ = "GUI: Mode set to INFERENCE_ONLY";
+            gui_error_.clear();
         }
         else {
-            controller_->post(Controller::CmdSetRunningMode{ Controller::RunningMode::INFERENCE_ONLY });
-            controller_->post(Controller::CmdArmRecording{ false });
-            last_status_ = "Mode: INFERENCE_ONLY (saving disabled)";
+            controller_->post(Controller::CmdSetRunningMode{
+                Controller::RunningMode::INFERENCE_AND_LABELLING });
+            gui_status_ = "GUI: Mode set to INFERENCE_AND_LABELLING";
+            gui_error_.clear();
         }
     }
+
 
     ImGui::EndChild();
 
@@ -449,7 +538,7 @@ void EEGGuiApp::draw_ui_() {
 
     // ---------- path panel ----------
     ImGui::BeginChild("path_panel", ImVec2(0, h_path), true);
-    ImGui::Text("eeg data 파일이름/경로 설정");
+    ImGui::Text("eeg data filename/path setting");
     ImGui::Separator();
 
     static char out_dir[256] = "./data";
@@ -459,9 +548,17 @@ void EEGGuiApp::draw_ui_() {
     ImGui::InputText("File name", out_name, IM_ARRAYSIZE(out_name));
 
     if (ImGui::Button("Apply Path", ImVec2(140, 0))) {
-        controller_->post(Controller::CmdSetOutputDir{ std::string(out_dir) });
-        last_status_ = std::string("Output dir set: ") + out_dir;
+        if (!controller_) {
+            gui_error_ = "Controller not initialized (Open API first)";
+            gui_status_.clear();
+        }
+        else {
+            controller_->post(Controller::CmdSetOutputDir{ std::string(out_dir) });
+            gui_status_ = std::string("GUI: Output dir set: ") + out_dir;
+            gui_error_.clear();
+        }
     }
+
 
     ImGui::EndChild();
 
@@ -474,7 +571,7 @@ void EEGGuiApp::draw_ui_() {
 // ----------------------
 int EEGGuiApp::run() {
     if (!init_window_and_imgui_()) {
-        std::cerr << "[ERROR] GUI init failed: " << last_error_ << "\n";
+        std::cerr << "[ERROR] GUI init failed: " << gui_error_ << "\n";
         return 1;
     }
 
