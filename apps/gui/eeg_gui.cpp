@@ -66,13 +66,17 @@ bool EEGGuiApp::init_window_and_imgui_() {
         return false;
     }
 
-    // macOS: OpenGL 3.2 Core
+#ifdef __APPLE__
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 2);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-#ifdef __APPLE__
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
+#else
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 #endif
+
 
     impl_->window = glfwCreateWindow(1100, 700, "eeg_gui", nullptr, nullptr);
     if (!impl_->window) {
@@ -148,17 +152,6 @@ bool EEGGuiApp::open_api_() {
 
     ::OpenApi_LXDeviceAPI(1, 0, 0);
     api_opened_ = true;
-
-    if (!dev_) {
-        LXConfig cfg;
-        cfg.lx_device_id = lx_device_id_;
-        cfg.numsample_return = numsample_return_;
-        cfg.num_channels = num_channels_;
-
-        dev_ = make_lx_device(cfg);
-        lsl_ = std::make_unique<DummyLSLBridge>();
-        controller_ = std::make_unique<Controller>(*dev_, *lsl_);
-    }
 
     gui_status_ = "GUI: API opened";
     gui_error_.clear();
@@ -288,7 +281,7 @@ void EEGGuiApp::draw_ui_() {
     ImGui::Text("Waveform");
 
     // Pull a snapshot from Controller (thread-safe copy)
-    Controller::VisSnapshot snap{};
+    Controller::VisSnapshot snap{}; 
     if (controller_) {
         snap = controller_->vis_snapshot();
     }

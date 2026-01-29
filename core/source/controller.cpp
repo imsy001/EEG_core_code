@@ -349,7 +349,14 @@ void Controller::do_stream_start() {
         stats_.last_status = "Starting streaming...";
     }
 
-    accepting_.store(true, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lk(vis_mtx_);
+        if (vis_capacity_ <= 0) vis_capacity_ = 5000;
+        vis_nch_ = 0;
+        vis_ring_.clear();
+        vis_write_ = 0;
+        vis_ready_ = true;
+    }
 
     const bool ok = device_.start_streaming([this](const EEGSample& s) {
         if (!accepting_.load(std::memory_order_acquire)) return;
@@ -369,6 +376,8 @@ void Controller::do_stream_start() {
         stats_.last_status = "start_streaming() failed";
         return;
     }
+
+    accepting_.store(true, std::memory_order_release);
 
     state_.store(State::STREAMING, std::memory_order_relaxed);
 
@@ -446,17 +455,16 @@ void Controller::on_eeg_sample(const EEGSample& sample) {
     ring_.push(sample);
     epoch_.push(sample);
 
-    // ✅ 고정 길이 epoch: end_ts를 넘는 순간 한 번만 종료
+
+    // fixed epoch logic ...
     if (fixed_epoch_armed_.load(std::memory_order_acquire)) {
         const double end_ts = fixed_epoch_end_ts_.load(std::memory_order_acquire);
-
         if (sample.timestamp_sec >= end_ts) {
-            // race 방지: 한 번만 들어오게
             bool expected = true;
             if (fixed_epoch_armed_.compare_exchange_strong(
                 expected, false, std::memory_order_acq_rel)) {
 
-                auto v = epoch_.end(end_ts, /*min_dur_sec=*/0.0);
+                auto v = epoch_.end(end_ts, 0.0);
                 if (v.empty()) return;
 
                 auto payload = std::make_shared<std::vector<EEGSample>>(std::move(v));
@@ -464,19 +472,20 @@ void Controller::on_eeg_sample(const EEGSample& sample) {
 
                 if (do_label_.load(std::memory_order_relaxed))
                     post(CmdSaveEpoch{ ro, end_ts });
-
                 if (do_infer_.load(std::memory_order_relaxed))
                     post(CmdInferEpoch{ ro, end_ts });
-
             }
         }
     }
 }
 
 
+
 //-------------------- Visualization ring buffer --------------------
 void Controller::push_vis_sample_(const EEGSample& s) {
     const int nch = static_cast<int>(s.channels.size());
+
+    if (vis_capacity_ <= 0) return; // should never happen if init is correct
     if (nch <= 0) return;
 
     std::lock_guard<std::mutex> lk(vis_mtx_);
