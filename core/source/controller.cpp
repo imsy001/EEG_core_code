@@ -452,13 +452,19 @@ void Controller::on_eeg_sample(const EEGSample& sample) {
         stats_.samples_total++;
     }
 
+    // Always keep continuous history
     ring_.push(sample);
-    epoch_.push(sample);
 
-
-    // fixed epoch logic ...
+    // Only collect epoch samples when armed
     if (fixed_epoch_armed_.load(std::memory_order_acquire)) {
         const double end_ts = fixed_epoch_end_ts_.load(std::memory_order_acquire);
+
+        // Collect up to end_ts (inclusive)
+        if (sample.timestamp_sec <= end_ts) {
+            epoch_.push(sample);
+        }
+
+        // Finalize once we reached the end
         if (sample.timestamp_sec >= end_ts) {
             bool expected = true;
             if (fixed_epoch_armed_.compare_exchange_strong(
@@ -478,6 +484,7 @@ void Controller::on_eeg_sample(const EEGSample& sample) {
         }
     }
 }
+
 
 
 
@@ -508,6 +515,7 @@ void Controller::push_vis_sample_(const EEGSample& s) {
 
 // -------------------- Marker thread --------------------
 
+// -------------------- ts ~ ts + 2 epoch save ----------------
 void Controller::on_marker(Marker marker, double ts) {
     {
         std::lock_guard<std::mutex> lk(stats_mtx_);
@@ -522,6 +530,64 @@ void Controller::on_marker(Marker marker, double ts) {
     else if (marker == Marker::SPACE_UP) end_epoch(ts);
 
 }
+
+// -------------------- ts - 2 ~ ts epoch save ----------------
+void Controller::on_marker_pre(Marker marker, double ts) {
+    {
+        std::lock_guard<std::mutex> lk(stats_mtx_);
+        stats_.marker_count++;
+    }
+
+    if (!config::kUseMarkerEpoching) return;
+    if (!armed_.load(std::memory_order_relaxed)) return;
+    if (state_.load(std::memory_order_relaxed) != State::STREAMING) return;
+
+    if (marker != Marker::SPACE_DOWN) return;
+
+    const double t0 = ts - 2.0;
+    auto v = ring_.slice(t0, ts);
+
+    // Enforce min duration (optional but recommended)
+    if (v.empty()) return;
+    const double dur = v.back().timestamp_sec - v.front().timestamp_sec;
+    if (dur < config::kMinEpochSeconds) return;
+
+    auto payload = std::make_shared<std::vector<EEGSample>>(std::move(v));
+    std::shared_ptr<const std::vector<EEGSample>> ro = payload;
+
+    if (do_label_.load(std::memory_order_relaxed))
+        post(CmdSaveEpoch{ ro, ts });
+
+    if (do_infer_.load(std::memory_order_relaxed))
+        post(CmdInferEpoch{ ro, ts });
+}
+
+// -------------------- ts - 2 ~ ts + 2 epoch save ----------------
+void Controller::on_marker_pre_post(Marker marker, double t) {
+    {
+        std::lock_guard<std::mutex> lk(stats_mtx_);
+        stats_.marker_count++;
+    }
+
+    if (!config::kUseMarkerEpoching) return;
+    if (!armed_.load(std::memory_order_relaxed)) return;
+    if (state_.load(std::memory_order_relaxed) != State::STREAMING) return;
+
+    if (marker != Marker::SPACE_DOWN) return;
+
+    const double t0 = t - 2.0;
+    const double tend = t + 2.0;
+
+    // 1) seed past [t-2, t] from ring history
+    auto pre = ring_.slice(t0, t);
+    epoch_.seed(t0, std::move(pre));
+
+    // 2) arm future end
+    fixed_epoch_end_ts_.store(tend, std::memory_order_release);
+    fixed_epoch_armed_.store(true, std::memory_order_release);
+}
+
+
 
 // -------------------- Epoch helpers --------------------
 

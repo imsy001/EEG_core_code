@@ -432,7 +432,7 @@ void EEGGuiApp::draw_ui_() {
     }
 
     ImGui::Separator();
-    if (ImGui::Button("Sim SPACE_DOWN (save 2s)", ImVec2(220, 0))) {
+    if (ImGui::Button("Sim SPACE_DOWN (save after 2s)", ImVec2(220, 0))) {
         if (!controller_) {
             gui_error_ = "GUI Error: Controller not initialized (Open API first)";
             gui_status_.clear();
@@ -456,6 +456,47 @@ void EEGGuiApp::draw_ui_() {
         }
     }
 
+    ImGui::Separator();
+    if (ImGui::Button("Sim SPACE_DOWN (save before 2s)", ImVec2(260, 0))) {
+        if (!controller_) {
+            gui_error_ = "GUI Error: Controller not initialized (Open API first)";
+            gui_status_.clear();
+        }
+        else if (!controller_->is_streaming()) {
+            gui_error_ = "Core is NOT STREAMING. Start streaming first.";
+            gui_status_.clear();
+        }
+        else {
+            const double ts = now_steady_seconds();
+
+            // Pre-trigger epoch: [ts-2, ts]
+            controller_->on_marker_pre(Marker::SPACE_DOWN, ts);
+
+            gui_status_ = "GUI: Simulated SPACE_DOWN (saved 2s pre-trigger epoch)";
+            gui_error_.clear();
+        }
+    }
+
+    ImGui::Separator();
+    if (ImGui::Button("Sim SPACE_DOWN (save before and after 2s)", ImVec2(260, 0))) {
+        if (!controller_) {
+            gui_error_ = "GUI Error: Controller not initialized (Open API first)";
+            gui_status_.clear();
+        }
+        else if (!controller_->is_streaming()) {
+            gui_error_ = "Core is NOT STREAMING. Start streaming first.";
+            gui_status_.clear();
+        }
+        else {
+            const double ts = now_steady_seconds();
+
+            // Pre-trigger epoch: [ts-2, ts+2]
+            controller_->on_marker_pre_post(Marker::SPACE_DOWN, ts);
+
+            gui_status_ = "GUI: Simulated SPACE_DOWN (saved 2s pre-trigger epoch and post 2s epoch)";
+            gui_error_.clear();
+        }
+    }
 
     ImGui::EndChild();
 

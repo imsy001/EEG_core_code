@@ -42,3 +42,11 @@ void EpochBuffer::clear() {
     start_ts_ = 0.0;
     buf_.clear();
 }
+
+void EpochBuffer::seed(double start_ts, std::vector<EEGSample>&& pre) {
+    std::lock_guard<std::mutex> lk(mtx_);
+    start_ts_ = start_ts;
+    buf_ = std::move(pre);     // keep pre-samples
+    active_ = true;
+}
+

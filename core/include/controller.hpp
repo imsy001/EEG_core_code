@@ -113,6 +113,8 @@ public:
     // Called by marker listener thread (LSL)
     // Provide timestamp_sec if you have it; otherwise pass host time.
     void on_marker(Marker marker, double timestamp_sec);
+    void on_marker_pre(Marker marker, double timestamp_sec);
+    void on_marker_pre_post(Marker marker, double timestamp_sec);
 
 public:
     // Visualization ring buffer (GUI thread)

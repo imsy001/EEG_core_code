@@ -13,6 +13,7 @@ public:
     std::vector<EEGSample> end(double ts, double min_dur_sec);
 
     void clear();
+    void seed(double start_ts, std::vector<EEGSample>&& pre);
 
 private:
     mutable std::mutex mtx_;
