@@ -19,7 +19,7 @@
 #include "epoch_buffer.hpp"
 
 #include "device/include/eeg_device.hpp"
-#include "device/include/lsl_bridge.hpp"
+#include "unity_LSL/include/lsl_bridge.hpp"
 
 // - command queue (GUI -> core)
 // - device streaming start/stop

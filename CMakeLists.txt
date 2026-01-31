@@ -28,8 +28,8 @@ target_include_directories(device
 )
 
 target_sources(device PRIVATE
-    device/source/unity_LSL.cpp
-)
+    "unity_LSL/source/unity_LSL.cpp"
+ "unity_LSL/source/lsl_reader.cpp")
 
 if(WIN32)
     target_sources(device PRIVATE
@@ -54,7 +54,7 @@ endif()
 # =========================================================
 add_library(inference
     inference/source/inference.cpp
-)
+ "unity_LSL/source/lsl_reader.cpp")
 
 target_include_directories(inference
     PUBLIC
@@ -69,7 +69,7 @@ add_library(core
     core/source/controller.cpp
     core/source/ring_buffer.cpp
     core/source/epoch_buffer.cpp
-)
+ "unity_LSL/source/lsl_reader.cpp")
 
 target_include_directories(core
     PUBLIC
@@ -109,7 +109,7 @@ add_library(imgui STATIC
 
     ${IMGUI_DIR}/backends/imgui_impl_glfw.cpp
     ${IMGUI_DIR}/backends/imgui_impl_opengl3.cpp
-)
+ "unity_LSL/source/lsl_reader.cpp")
 
 target_include_directories(imgui PUBLIC
     ${IMGUI_DIR}
@@ -127,7 +127,7 @@ target_link_libraries(imgui PUBLIC glfw)
 add_executable(eeg_gui
     apps/gui/main.cpp
     apps/gui/eeg_gui.cpp
-)
+ "unity_LSL/source/lsl_reader.cpp")
 
 target_include_directories(eeg_gui
     PRIVATE
@@ -170,3 +170,5 @@ if(WIN32)
     )
 endif()
 # =========================================================
+
+
