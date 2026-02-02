@@ -25,6 +25,9 @@ emit_command(Direction::Left)
 #include <iostream>
 #include <iomanip>
 #include <memory>
+#include <string>
+#include <sstream>
+
 
 namespace {
 void save_epoch_binary(const std::string& output_dir,
@@ -648,13 +651,41 @@ void Controller::do_clear_epoch() {
 
 // ------------------- LSL_Marker ----------------------------------------
 void Controller::on_marker_text(const std::string& text, double ts) {
-    if (text == "SPACE_DOWN") on_marker(Marker::SPACE_DOWN, ts);
-    else if (text == "SPACE_UP") on_marker(Marker::SPACE_UP, ts);
-    else if (text == "PING_FROM_CPP") {/* ignore or log */ }
-    else {
-        // unknown marker: log it
+    // expected:
+    // "SPACE_DOWN|label|unity_rt=...|lsl=..."
+
+    if (text.rfind("SPACE_DOWN|", 0) == 0) {
+        std::vector<std::string> parts;
+        std::stringstream ss(text);
+        std::string item;
+
+        while (std::getline(ss, item, '|'))
+            parts.push_back(item);
+
+        const std::string label =
+            (parts.size() > 1) ? parts[1] : "UNKNOWN";
+
+        // 핵심: SPACE_DOWN 이벤트 발생
+        on_marker(Marker::SPACE_DOWN, ts);
+
+        // (선택) 상태 표시
+        {
+            std::lock_guard<std::mutex> lk(stats_mtx_);
+            stats_.last_status = "Marker: SPACE_DOWN (" + label + ")";
+        }
+        return;
+    }
+
+    if (text.rfind("SPACE_UP", 0) == 0) {
+        on_marker(Marker::SPACE_UP, ts);
+        return;
+    }
+
+    // fallback
+    {
         std::lock_guard<std::mutex> lk(stats_mtx_);
         stats_.last_status = "Unknown marker: " + text;
     }
 }
+
 
