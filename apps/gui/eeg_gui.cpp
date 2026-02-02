@@ -6,6 +6,10 @@
 #include <vector>
 #include <chrono>
 
+#include "unity_LSL/include/lsl_bridge_impl.hpp"
+
+
+
 static double now_steady_seconds() {
     using namespace std::chrono;
     return duration<double>(steady_clock::now().time_since_epoch()).count();
@@ -27,15 +31,6 @@ static double now_steady_seconds() {
 #include "backends/imgui_impl_opengl3.h"
 
 #include <GLFW/glfw3.h>
-
-// ----------------------
-// Dummy LSLBridge
-// ----------------------
-class DummyLSLBridge final : public LSLBridge {
-public:
-    void send_marker(Marker, double) override {}
-    void send_direction(Direction, double) override {}
-};
 
 // ----------------------
 // Private implementation
@@ -146,7 +141,12 @@ bool EEGGuiApp::open_api_() {
         cfg.num_channels = num_channels_;
 
         dev_ = make_lx_device(cfg);
-        lsl_ = std::make_unique<DummyLSLBridge>();
+        lsl_ = std::make_unique<LSLBridgeImpl>(
+            "UnityMarkers",          // ✅ RX (Unity -> C++)
+            "CppToUnityMarkers",     // ✅ TX marker
+            "CppToUnityDirections"   // ✅ TX direction
+        );
+
         controller_ = std::make_unique<Controller>(*dev_, *lsl_);
     }
 
@@ -360,7 +360,7 @@ void EEGGuiApp::draw_ui_() {
     const float h_state = 120.0f;
     const float h_eeg_btn = 95.0f;
     const float h_log = 120.0f;
-    const float h_unity = 120.0f;
+    const float h_unity = 180.0f;
     const float h_mode = 110.0f;
     const float h_path = 140.0f;
 
@@ -502,32 +502,57 @@ void EEGGuiApp::draw_ui_() {
 
     ImGui::Dummy(ImVec2(0, pad));
 
-    // ---------- eeg log ----------
-    ImGui::BeginChild("eeg_log", ImVec2(0, h_log), true);
-    ImGui::Text("eeg_log");
-    ImGui::Separator();
-    ImGui::Text("lx_device_id: %d", lx_device_id_);
-    ImGui::Text("numsample_return: %d", numsample_return_);
-    ImGui::Text("num_channels: %d", num_channels_);
-    ImGui::EndChild();
-
-    ImGui::Dummy(ImVec2(0, pad));
 
     // ---------- unity panel ----------
     ImGui::BeginChild("unity_panel", ImVec2(0, h_unity), true);
     ImGui::Text("unity_log/button");
     ImGui::Separator();
 
-    if (ImGui::Button("Ping Unity", ImVec2(140, 0))) {
-        // TODO
+    ImGui::Text("RX: UnityMarkers | TX: CppToUnityMarkers");
+    const bool reader_running = lsl_ ? lsl_->rx_running() : false;
+
+    if (!lsl_) {
+        ImGui::TextColored(ImVec4(1, 0.5f, 0.5f, 1), "LSLBridge not initialized (Open API first)");
     }
+    else {
+        if (!reader_running) {
+            if (ImGui::Button("Connect", ImVec2(140, 0))) {
+                if (!controller_) {
+                    gui_error_ = "Controller not initialized (Open API first)";
+                    gui_status_.clear();
+                }
+                else {
+                    lsl_->start_rx([&](const std::string& text, double /*lsl_ts*/) {
+                        controller_->on_marker_text(text, now_steady_seconds());
+                        });
+                    log_rx_.push("[RX] Connecting to stream: UnityMarkers");
+                }
+            }
+        }
+        else {
+            if (ImGui::Button("Stop", ImVec2(140, 0))) {
+                lsl_->stop_rx();
+                log_rx_.push("[RX] Stopped");
+            }
+        }
+    }
+
+
     ImGui::SameLine();
-    if (ImGui::Button("Send SPACE_DOWN", ImVec2(170, 0))) {
-        // TODO
+    if (ImGui::Button("Clear Logs", ImVec2(140, 0))) {
+        log_rx_.clear();
+        log_tx_.clear();
     }
+
+    ImGui::SameLine();
+    ImGui::Checkbox("Auto-scroll", &unity_auto_scroll_);
+
+    ImGui::Separator();
+
+    // ... send_marker buttons ...
+
     ImGui::EndChild();
 
-    ImGui::Dummy(ImVec2(0, pad));
 
     // ---------- mode panel ----------
     ImGui::BeginChild("mode_panel", ImVec2(0, h_mode), true);

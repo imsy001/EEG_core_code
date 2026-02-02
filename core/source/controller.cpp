@@ -645,3 +645,16 @@ void Controller::do_clear_epoch() {
     std::cout << "[Controller] do_clear_epoch() called\n";
     epoch_.clear();
 }
+
+// ------------------- LSL_Marker ----------------------------------------
+void Controller::on_marker_text(const std::string& text, double ts) {
+    if (text == "SPACE_DOWN") on_marker(Marker::SPACE_DOWN, ts);
+    else if (text == "SPACE_UP") on_marker(Marker::SPACE_UP, ts);
+    else if (text == "PING_FROM_CPP") {/* ignore or log */ }
+    else {
+        // unknown marker: log it
+        std::lock_guard<std::mutex> lk(stats_mtx_);
+        stats_.last_status = "Unknown marker: " + text;
+    }
+}
+

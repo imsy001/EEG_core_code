@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.16)
+﻿cmake_minimum_required(VERSION 3.16)
 project(EEG_CORE LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -14,10 +14,43 @@ set(LXSDK_DLL     "${LXSDK_DLL_DIR}/LXDeviceAPI.dll")
 set(LXSDK_CHART   "${LXSDK_DLL_DIR}/chartdir60.dll")
 set(LXSDK_UTILDIR "${LXSDK_DLL_DIR}/LXDeviceAPI_Utility")
 
+# ---------------------------------------------------------
+# liblsl paths (your layout)
+# ---------------------------------------------------------
+set(LSL_INCLUDE_DIR "${PROJECT_SOURCE_DIR}/external/liblsl/include")
+set(LSL_LIB         "${PROJECT_SOURCE_DIR}/external/liblsl/lib/lsl.lib")
+set(LSL_DLL         "${PROJECT_SOURCE_DIR}/external/liblsl/bin/lsl.dll")
+
+# ---------------------------------------------------------
+# MSVC: source encoding (avoid codepage 949 warnings)
+# ---------------------------------------------------------
+if(MSVC)
+    add_compile_options(/utf-8)
+endif()
+
+# =========================================================
+# unity_lsl library  (ONLY place that compiles LSL sources)
+# =========================================================
+add_library(unity_lsl STATIC
+    unity_LSL/source/unity_LSL.cpp
+    unity_LSL/source/lsl_reader.cpp
+    unity_LSL/source/lsl_bridge_impl.cpp
+)
+
+target_include_directories(unity_lsl
+    PUBLIC
+        ${PROJECT_SOURCE_DIR}
+        ${PROJECT_SOURCE_DIR}/unity_LSL/include
+        ${LSL_INCLUDE_DIR}
+)
+
+# Link liblsl binary (Windows)
+if(WIN32)
+    target_link_libraries(unity_lsl PUBLIC ${LSL_LIB})
+endif()
+
 # =========================================================
 # device library
-#   - Windows: LXDeviceAPI (real device)
-#   - macOS/Linux: stub/mock (buildable)
 # =========================================================
 add_library(device)
 
@@ -27,10 +60,6 @@ target_include_directories(device
         ${PROJECT_SOURCE_DIR}
 )
 
-target_sources(device PRIVATE
-    "unity_LSL/source/unity_LSL.cpp"
- "unity_LSL/source/lsl_reader.cpp")
-
 if(WIN32)
     target_sources(device PRIVATE
         device/source/eeg_LXDAPI.cpp
@@ -38,6 +67,7 @@ if(WIN32)
 
     target_link_libraries(device PUBLIC
         ${LXSDK_LIB}
+        unity_lsl
     )
 else()
     target_sources(device PRIVATE
@@ -47,6 +77,10 @@ else()
     target_compile_definitions(device PUBLIC
         EEG_NO_LXDEVICEAPI=1
     )
+
+    target_link_libraries(device PUBLIC
+        unity_lsl
+    )
 endif()
 
 # =========================================================
@@ -54,12 +88,17 @@ endif()
 # =========================================================
 add_library(inference
     inference/source/inference.cpp
- "unity_LSL/source/lsl_reader.cpp")
+)
 
 target_include_directories(inference
     PUBLIC
         ${PROJECT_SOURCE_DIR}/inference/include
         ${PROJECT_SOURCE_DIR}
+)
+
+target_link_libraries(inference
+    PUBLIC
+        unity_lsl
 )
 
 # =========================================================
@@ -69,7 +108,7 @@ add_library(core
     core/source/controller.cpp
     core/source/ring_buffer.cpp
     core/source/epoch_buffer.cpp
- "unity_LSL/source/lsl_reader.cpp")
+)
 
 target_include_directories(core
     PUBLIC
@@ -81,17 +120,15 @@ target_link_libraries(core
     PUBLIC
         device
         inference
+        unity_lsl
 )
 
 # =========================================================
 # GUI deps: Dear ImGui + GLFW (vendored in external/)
-#   external/imgui
-#   external/glfw
 # =========================================================
 set(IMGUI_DIR "${PROJECT_SOURCE_DIR}/external/imgui")
 set(GLFW_DIR  "${PROJECT_SOURCE_DIR}/external/glfw")
 
-# Build GLFW from vendored source
 set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_DOCS     OFF CACHE BOOL "" FORCE)
@@ -99,35 +136,31 @@ set(GLFW_INSTALL        OFF CACHE BOOL "" FORCE)
 
 add_subdirectory(${GLFW_DIR} ${CMAKE_BINARY_DIR}/_deps/glfw)
 
-# ImGui static library
 add_library(imgui STATIC
     ${IMGUI_DIR}/imgui.cpp
     ${IMGUI_DIR}/imgui_draw.cpp
     ${IMGUI_DIR}/imgui_tables.cpp
     ${IMGUI_DIR}/imgui_widgets.cpp
     ${IMGUI_DIR}/imgui_demo.cpp
-
     ${IMGUI_DIR}/backends/imgui_impl_glfw.cpp
     ${IMGUI_DIR}/backends/imgui_impl_opengl3.cpp
- "unity_LSL/source/lsl_reader.cpp")
+)
 
-target_include_directories(imgui PUBLIC
-    ${IMGUI_DIR}
-    ${IMGUI_DIR}/backends
+target_include_directories(imgui
+    PUBLIC
+        ${IMGUI_DIR}
+        ${IMGUI_DIR}/backends
 )
 
 target_link_libraries(imgui PUBLIC glfw)
 
 # =========================================================
 # GUI application
-#   apps/gui/main.cpp
-#   apps/gui/eeg_gui.cpp
-#   apps/gui/eeg_gui.hpp
 # =========================================================
 add_executable(eeg_gui
     apps/gui/main.cpp
     apps/gui/eeg_gui.cpp
- "unity_LSL/source/lsl_reader.cpp")
+)
 
 target_include_directories(eeg_gui
     PRIVATE
@@ -139,9 +172,10 @@ target_link_libraries(eeg_gui
     PRIVATE
         core
         imgui
+        unity_lsl
 )
 
-# OpenGL link (platform-specific)
+# OpenGL link
 if(APPLE)
     target_link_libraries(eeg_gui PRIVATE "-framework OpenGL")
 elseif(WIN32)
@@ -167,8 +201,10 @@ if(WIN32)
         COMMAND ${CMAKE_COMMAND} -E copy_directory
             "${LXSDK_UTILDIR}"
             "$<TARGET_FILE_DIR:eeg_gui>/LXDeviceAPI_Utility"
+
+        # ✅ liblsl runtime
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${LSL_DLL}"
+            "$<TARGET_FILE_DIR:eeg_gui>"
     )
 endif()
-# =========================================================
-
-

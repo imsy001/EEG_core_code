@@ -6,6 +6,9 @@
 #include <mutex>
 #include <vector>
 
+#include "unity_LSL/include/log_buffer.hpp"
+#include "unity_LSL/include/lsl_reader.hpp"
+
 // Forward declarations to avoid pulling heavy headers into the .hpp
 class EEGDevice;
 class Controller;
@@ -82,4 +85,13 @@ private:
     // UI selections
     int ui_channel_ = 0;              // which channel to plot
     int ui_plot_n_ = 600;             // how many samples to plot
+
+    // ---- Unity/LSL ----
+    LogBuffer log_rx_;     // received from Unity
+    LogBuffer log_tx_;     // sent from this GUI
+    std::unique_ptr<LSLReader> unity_reader_;
+    std::unique_ptr<lsl::stream_outlet> unity_outlet_;
+    bool unity_auto_scroll_ = true;
+    bool unity_outlet_ready_ = false;
+
 };
