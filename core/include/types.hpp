@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <optional>
 
 // ================================
 // Marker (experiment timing)
@@ -25,6 +26,14 @@ enum class Direction : std::uint8_t {
     ZOOM_IN = 4,
     ZOOM_OUT = 5
 };
+
+
+struct EpochMeta {
+    double trigger_ts = 0.0;          // your timeline timestamp at trigger
+    Marker marker = Marker::SPACE_DOWN;
+    std::optional<Direction> direction; // optional
+};
+
 
 // ================================
 // EEG sample (atomic unit)

@@ -225,7 +225,7 @@ void EEGGuiApp::stop_streaming_() {
 // UI
 // ----------------------
 void EEGGuiApp::draw_ui_() {
-	// Pull stats from Controller
+    // Pull stats from Controller
     Controller::Stats ctrl{};
     bool has_ctrl = false;
 
@@ -253,7 +253,7 @@ void EEGGuiApp::draw_ui_() {
     // ---------- layout params ----------
     const float pad = 10.0f;
 
-    const float right_ratio = 0.33f;
+    const float right_ratio = 0.25f;
     const float right_min_w = 360.0f;
     const float right_max_w = 520.0f;
 
@@ -281,7 +281,7 @@ void EEGGuiApp::draw_ui_() {
     ImGui::Text("Waveform");
 
     // Pull a snapshot from Controller (thread-safe copy)
-    Controller::VisSnapshot snap{}; 
+    Controller::VisSnapshot snap{};
     if (controller_) {
         snap = controller_->vis_snapshot();
     }
@@ -292,7 +292,7 @@ void EEGGuiApp::draw_ui_() {
     ImGui::SliderInt("Plot N", &ui_plot_n_, 100, maxPlotN);
 
     // ---- Multi-channel (first K) stacked plots ----
-    const int K = 6;
+    const int K = 27;
     std::vector<float> plots;
     int N = 0;
     int useK = 0;
@@ -322,15 +322,28 @@ void EEGGuiApp::draw_ui_() {
         ImGui::TextDisabled("No samples yet...");
     }
     else {
-        float avail_h = ImGui::GetContentRegionAvail().y;
-        float per_h = std::max(50.0f, (avail_h - 20.0f) / (float)useK);
-
-        // One shared scale slider (not repeated per channel)
+        // ---- Controls (fixed, not scrolling) ----
         static float eeg_scale = 100.0f;
         ImGui::SliderFloat("EEG scale (±uV)", &eeg_scale, 10.0f, 500.0f);
 
+        // (optional) tighter spacing to fit more per screen
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(ImGui::GetStyle().ItemSpacing.x, 2.0f));
+
+        // Remaining height for scrolling area
+        float scroll_h = ImGui::GetContentRegionAvail().y;
+
+        // ---- Scrollable plots area ----
+        ImGui::BeginChild("plot_scroll", ImVec2(0.0f, scroll_h), true,
+            ImGuiWindowFlags_HorizontalScrollbar);
+
+        // Decide per-plot height (fixed height per channel)
+        static float per_plot_h = 55.0f;                 // ✅ 이 값을 키우면 "세로 커짐"
+        ImGui::SliderFloat("Plot height", &per_plot_h, 20.0f, 160.0f);
+        ImGui::Separator();
+
         for (int c = 0; c < useK; ++c) {
             ImGui::PushID(c);
+
             ImGui::Text("Ch %d", c);
 
             ImGui::PlotLines(
@@ -341,35 +354,43 @@ void EEGGuiApp::draw_ui_() {
                 nullptr,
                 -eeg_scale,
                 eeg_scale,
-                ImVec2(0, per_h)
+                ImVec2(0.0f, per_plot_h) // ✅ 고정 height -> 스크롤로 전체를 볼 수 있음
             );
 
             ImGui::PopID();
         }
+
+        ImGui::EndChild(); // plot_scroll
+        ImGui::PopStyleVar();
     }
+
+
 
     ImGui::EndChild();
     ImGui::SameLine(0.0f, pad);
 
 
     // =========================================================
-    // RIGHT : CONTROL PANELS
-    // =========================================================
+// RIGHT : CONTROL PANELS
+// =========================================================
     ImGui::BeginChild("right_col", ImVec2(right_w, full_h), false);
 
-    const float h_state = 120.0f;
-    const float h_eeg_btn = 95.0f;
-    const float h_log = 120.0f;
-    const float h_unity = 180.0f;
-    const float h_mode = 110.0f;
-    const float h_path = 140.0f;
+    // ---- panel heights ----
+    const float h_state = 90.0f;
+    const float h_check = 170.0f;
+    const float h_control = 60.0f;     // Open API / Open Device
+    const float h_eeg_btn = 150.0f;    // Start/Stop + 3 sim buttons
+    const float h_unity = 100.0f;
+    const float h_mode = 80.0f;
+    const float h_path = 110.0f;
+    const float h_infer = 120.0f;
 
-    // ---------- status ----------
+    // ---------- Status ----------
     ImGui::BeginChild("status_panel", ImVec2(0, h_state), true);
     ImGui::Text("Status");
     ImGui::Separator();
 
-    // ---- GUI messages ----
+    // GUI messages
     if (!gui_status_.empty())
         ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f),
             "GUI: %s", gui_status_.c_str());
@@ -378,7 +399,7 @@ void EEGGuiApp::draw_ui_() {
         ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.5f, 1.0f),
             "GUI Error: %s", gui_error_.c_str());
 
-    // ---- Controller truth ----
+    // Controller truth
     if (has_ctrl) {
         if (!ctrl.last_status.empty())
             ImGui::Text("Core: %s", ctrl.last_status.c_str());
@@ -393,117 +414,78 @@ void EEGGuiApp::draw_ui_() {
     else {
         ImGui::TextDisabled("Core: not initialized");
     }
+    ImGui::EndChild();
+    ImGui::Dummy(ImVec2(0, pad));
 
+
+    // ---------- Checklist ----------
+    ImGui::BeginChild("checklist_panel", ImVec2(0, h_check), true);
+    ImGui::Text("Checklist");
+    ImGui::Separator();
+
+    // Persist checkbox states across frames
+    static bool ck_open_api = false;
+    static bool ck_open_dev = false;
+    static bool ck_lsl_conn = false;     // (기존 ck_lsl_conn 대체)
+    static bool ck_mode_applied = false;   // ✅ 추가
+
+    
+
+    // Auto-fill (read-only처럼 쓰고 싶으면 아래 Text로 바꾸는 것도 가능)
+    ck_open_api = api_opened_;
+    ck_lsl_conn = lsl_ ? lsl_->rx_running() : false;
+
+    // ck_open_dev는 네가 실제 device-open 상태 플래그가 없어서 일단 수동 유지.
+    // (원하면 Controller::Stats에 device_opened 같은 거 추가해서 여기 자동화 가능)
+    ImGui::Checkbox("Open API", &ck_open_api);
+    ImGui::Checkbox("Open Device", &ck_open_dev);
+    ImGui::Checkbox("Unity Connected", &ck_lsl_conn);
+    ImGui::Checkbox("Mode applied", &ck_mode_applied);
+    
+
+    int done = (int)ck_open_api + (int)ck_open_dev + (int)ck_lsl_conn;
+    ImGui::Separator();
+    ImGui::Text("Progress: %d / 4", done);
 
     ImGui::EndChild();
     ImGui::Dummy(ImVec2(0, pad));
 
 
-
-    // ---------- EEG control ----------
-    ImGui::BeginChild("eeg_button", ImVec2(0, h_eeg_btn), true);
-    ImGui::Text("EEG control");
+    // ---------- Control (API / Device) ----------
+    ImGui::BeginChild("control_panel", ImVec2(0, h_control), true);
+    ImGui::Text("Control");
     ImGui::Separator();
 
-    if (ImGui::Button("Open API", ImVec2(140, 0))) {
-        open_api_();
-    }
-    if (ImGui::Button("Open Device", ImVec2(140, 0))) {
-        open_device_();
-    }
+    {
+        float w = ImGui::GetContentRegionAvail().x;
+        float gap = ImGui::GetStyle().ItemSpacing.x;
+        float half = (w - gap) * 0.5f;
 
-    const bool isStreaming = controller_ ? controller_->is_streaming() : false;
-
-    if (!isStreaming) {
-        if (ImGui::Button("Start Streaming", ImVec2(180, 0))) {
-            start_streaming_();
+        // Open API
+        ImGui::BeginDisabled(api_opened_);
+        if (ImGui::Button("Open API", ImVec2(half, 0))) {
+            open_api_();
+            // Checklist sync (optional)
+            ck_open_api = api_opened_;
         }
-    }
-    else {
-        if (ImGui::Button("Stop Streaming", ImVec2(180, 0))) {
-            stop_streaming_();
+        ImGui::EndDisabled();
+
+        ImGui::SameLine(0.0f, gap);
+
+        // Open Device (API must be opened)
+        ImGui::BeginDisabled(!api_opened_);
+        if (ImGui::Button("Open Device", ImVec2(half, 0))) {
+            open_device_();
+            ck_open_dev = true; // (임시) 실제 open 확인은 core stats로 바꾸는게 베스트
         }
-    }
-
-
-    ImGui::SameLine();
-    if (ImGui::Button("Quit", ImVec2(120, 0))) {
-        want_quit_ = true;
-    }
-
-    ImGui::Separator();
-    if (ImGui::Button("Sim SPACE_DOWN (save after 2s)", ImVec2(220, 0))) {
-        if (!controller_) {
-            gui_error_ = "GUI Error: Controller not initialized (Open API first)";
-            gui_status_.clear();
-        }
-        else if (!controller_->is_streaming()) {
-            gui_error_ = "Core is NOT STREAMING. Start streaming first.";
-            gui_status_.clear();
-        }
-        else {
-            const double ts = now_steady_seconds();
-
-            // This triggers:
-            // - epoch_.start(ts)
-            // - fixed_epoch_end_ts_ = ts + 2.0
-            // - fixed_epoch_armed_ = true
-            // Then on_eeg_sample() will auto end at ts+2.0 and post CmdSaveEpoch/CmdInferEpoch
-            controller_->on_marker(Marker::SPACE_DOWN, ts);
-
-            gui_status_ = "GUI: Simulated SPACE_DOWN (will auto-save 2.0s epoch)";
-            gui_error_.clear();
-        }
-    }
-
-    ImGui::Separator();
-    if (ImGui::Button("Sim SPACE_DOWN (save before 2s)", ImVec2(260, 0))) {
-        if (!controller_) {
-            gui_error_ = "GUI Error: Controller not initialized (Open API first)";
-            gui_status_.clear();
-        }
-        else if (!controller_->is_streaming()) {
-            gui_error_ = "Core is NOT STREAMING. Start streaming first.";
-            gui_status_.clear();
-        }
-        else {
-            const double ts = now_steady_seconds();
-
-            // Pre-trigger epoch: [ts-2, ts]
-            controller_->on_marker_pre(Marker::SPACE_DOWN, ts);
-
-            gui_status_ = "GUI: Simulated SPACE_DOWN (saved 2s pre-trigger epoch)";
-            gui_error_.clear();
-        }
-    }
-
-    ImGui::Separator();
-    if (ImGui::Button("Sim SPACE_DOWN (save before and after 2s)", ImVec2(260, 0))) {
-        if (!controller_) {
-            gui_error_ = "GUI Error: Controller not initialized (Open API first)";
-            gui_status_.clear();
-        }
-        else if (!controller_->is_streaming()) {
-            gui_error_ = "Core is NOT STREAMING. Start streaming first.";
-            gui_status_.clear();
-        }
-        else {
-            const double ts = now_steady_seconds();
-
-            // Pre-trigger epoch: [ts-2, ts+2]
-            controller_->on_marker_pre_post(Marker::SPACE_DOWN, ts);
-
-            gui_status_ = "GUI: Simulated SPACE_DOWN (saved 2s pre-trigger epoch and post 2s epoch)";
-            gui_error_.clear();
-        }
+        ImGui::EndDisabled();
     }
 
     ImGui::EndChild();
-
     ImGui::Dummy(ImVec2(0, pad));
 
 
-    // ---------- unity panel ----------
+    // ---------- Unity panel ----------
     ImGui::BeginChild("unity_panel", ImVec2(0, h_unity), true);
     ImGui::Text("unity_log/button");
     ImGui::Separator();
@@ -512,7 +494,8 @@ void EEGGuiApp::draw_ui_() {
     const bool reader_running = lsl_ ? lsl_->rx_running() : false;
 
     if (!lsl_) {
-        ImGui::TextColored(ImVec4(1, 0.5f, 0.5f, 1), "LSLBridge not initialized (Open API first)");
+        ImGui::TextColored(ImVec4(1, 0.5f, 0.5f, 1),
+            "LSLBridge not initialized (Open API first)");
     }
     else {
         if (!reader_running) {
@@ -537,7 +520,6 @@ void EEGGuiApp::draw_ui_() {
         }
     }
 
-
     ImGui::SameLine();
     if (ImGui::Button("Clear Logs", ImVec2(140, 0))) {
         log_rx_.clear();
@@ -552,50 +534,74 @@ void EEGGuiApp::draw_ui_() {
     // ... send_marker buttons ...
 
     ImGui::EndChild();
+    ImGui::Dummy(ImVec2(0, pad));
 
 
-    // ---------- mode panel ----------
+    // ---------- Mode panel ----------
     ImGui::BeginChild("mode_panel", ImVec2(0, h_mode), true);
-    ImGui::Text("mode setting button");
+    ImGui::Text("Mode setting");
     ImGui::Separator();
 
-    static int mode = 0;
-    ImGui::RadioButton("Labeling Only", &mode, 0); ImGui::SameLine();
-    ImGui::RadioButton("Inference Only", &mode, 1); ImGui::SameLine();
-    ImGui::RadioButton("Inference and Labeling", &mode, 2);
+    static bool mode_labeling = false;
+    static bool mode_inference = false;
 
-    // mode: 0=Labeling Only, 1=Inference Only, 2=Inference and Labeling (your GUI)
+    ImGui::Checkbox("Labeling", &mode_labeling);
+    ImGui::SameLine();
+    ImGui::Checkbox("Inference", &mode_inference);
+    
+    ImGui::Separator();
+
+    // 현재 선택 상태 표시 (가독성)
+    const char* mode_text = "NONE";
+    if (mode_labeling && mode_inference) mode_text = "LABELING + INFERENCE";
+    else if (mode_labeling)             mode_text = "LABELING ONLY";
+    else if (mode_inference)            mode_text = "INFERENCE ONLY";
+
+    ImGui::Text("Current: %s", mode_text);
+
+    // Apply 버튼
     if (ImGui::Button("Apply Mode", ImVec2(140, 0))) {
         if (!controller_) {
             gui_error_ = "Controller not initialized (Open API first)";
             gui_status_.clear();
         }
-        else if (mode == 0) {
-            controller_->post(Controller::CmdSetRunningMode{
-                Controller::RunningMode::LABELLING_ONLY });
-            gui_status_ = "GUI: Mode set to LABELLING_ONLY";
-            gui_error_.clear();
-        }
-        else if (mode == 1) {
-            controller_->post(Controller::CmdSetRunningMode{
-                Controller::RunningMode::INFERENCE_ONLY });
-            gui_status_ = "GUI: Mode set to INFERENCE_ONLY";
-            gui_error_.clear();
-        }
         else {
-            controller_->post(Controller::CmdSetRunningMode{
-                Controller::RunningMode::INFERENCE_AND_LABELLING });
-            gui_status_ = "GUI: Mode set to INFERENCE_AND_LABELLING";
+            bool applied = false;
+
+            if (mode_labeling && mode_inference) {
+                controller_->post(Controller::CmdSetRunningMode{ Controller::RunningMode::INFERENCE_AND_LABELLING });
+                gui_status_ = "GUI: Mode set to INFERENCE_AND_LABELLING";
+                applied = true;
+            }
+            else if (mode_labeling) {
+                controller_->post(Controller::CmdSetRunningMode{ Controller::RunningMode::LABELLING_ONLY });
+                gui_status_ = "GUI: Mode set to LABELLING_ONLY";
+                applied = true;
+            }
+            else if (mode_inference) {
+                controller_->post(Controller::CmdSetRunningMode{ Controller::RunningMode::INFERENCE_ONLY });
+                gui_status_ = "GUI: Mode set to INFERENCE_ONLY";
+                applied = true;
+            }
+            else {
+                gui_status_ = "GUI: Mode unchanged (none selected)";
+            }
+
             gui_error_.clear();
+
+            if (applied) ck_mode_applied = true;
         }
     }
 
 
     ImGui::EndChild();
-
     ImGui::Dummy(ImVec2(0, pad));
 
-    // ---------- path panel ----------
+
+
+    // ---------- Path panel ----------
+    ImGui::BeginDisabled(!mode_labeling);   // 🔴 Labeling 아닐 때 비활성화
+
     ImGui::BeginChild("path_panel", ImVec2(0, h_path), true);
     ImGui::Text("eeg data filename/path setting");
     ImGui::Separator();
@@ -612,18 +618,149 @@ void EEGGuiApp::draw_ui_() {
             gui_status_.clear();
         }
         else {
-            controller_->post(Controller::CmdSetOutputDir{ std::string(out_dir) });
+            controller_->post(
+                Controller::CmdSetOutputDir{ std::string(out_dir) }
+            );
             gui_status_ = std::string("GUI: Output dir set: ") + out_dir;
             gui_error_.clear();
         }
     }
 
+    ImGui::EndChild();
+
+    ImGui::EndDisabled();                   // 🔴 여기까지
+    ImGui::Dummy(ImVec2(0, pad));
+
+
+    // ---------- Inference model panel ----------
+// 🔴 Inference 체크 안 하면 패널 전체 비활성화(흐리게 + 클릭 불가)
+    ImGui::BeginDisabled(!mode_inference);
+
+    ImGui::BeginChild("inference_model_panel", ImVec2(0, h_infer), true);
+    ImGui::Text("Inference model");
+    ImGui::Separator();
+
+    const bool core_ready = (controller_ != nullptr);
+    const bool streaming_now = core_ready ? controller_->is_streaming() : false;
+
+    ImGui::Text("Model: %s", "onnx (todo)"); // placeholder
+    ImGui::Text("Ready: %s", core_ready ? "YES" : "NO");
+    ImGui::Text("Streaming: %s", streaming_now ? "YES" : "NO");
+
+    ImGui::Separator();
+
+    // 버튼은 inference가 켜져 있어도 core가 없으면 또 막고 싶으면 이렇게
+    ImGui::BeginDisabled(!core_ready);
+
+    if (ImGui::Button("Load Model", ImVec2(140, 0))) {
+        gui_status_ = "GUI: Load Model (TODO)";
+        gui_error_.clear();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Run Inference Now", ImVec2(180, 0))) {
+        gui_status_ = "GUI: Run Inference (TODO)";
+        gui_error_.clear();
+    }
+
+    ImGui::EndDisabled();
 
     ImGui::EndChild();
+    ImGui::EndDisabled();   // 🔴 여기까지 inference gating
+    ImGui::Dummy(ImVec2(0, pad));
+
+
+
+    // ---------- EEG control (moved to bottom) ----------
+    ImGui::BeginChild("eeg_button", ImVec2(0, h_eeg_btn), true);
+    ImGui::Text("EEG control");
+    ImGui::Separator();
+
+    const bool isStreaming = controller_ ? controller_->is_streaming() : false;
+
+    if (!isStreaming) {
+        ImGui::BeginDisabled(!api_opened_);
+        if (ImGui::Button("Start Streaming", ImVec2(180, 0))) {
+            start_streaming_();
+        }
+        ImGui::EndDisabled();
+    }
+    else {
+        if (ImGui::Button("Stop Streaming", ImVec2(180, 0))) {
+            stop_streaming_();
+        }
+    }
+
+    ImGui::SameLine();
+    if (ImGui::Button("Quit", ImVec2(120, 0))) {
+        want_quit_ = true;
+    }
+
+    ImGui::Separator();
+
+    if (ImGui::Button("Sim SPACE_DOWN (save after 2s)", ImVec2(260, 0))) {
+        if (!controller_) {
+            gui_error_ = "GUI Error: Controller not initialized (Open API first)";
+            gui_status_.clear();
+        }
+        else if (!controller_->is_streaming()) {
+            gui_error_ = "Core is NOT STREAMING. Start streaming first.";
+            gui_status_.clear();
+        }
+        else {
+            const double ts = now_steady_seconds();
+            controller_->on_marker(Marker::SPACE_DOWN, ts);
+            gui_status_ = "GUI: Simulated SPACE_DOWN (will auto-save 2.0s epoch)";
+            gui_error_.clear();
+            
+        }
+    }
+
+    if (ImGui::Button("Sim SPACE_DOWN (save before 2s)", ImVec2(260, 0))) {
+        if (!controller_) {
+            gui_error_ = "GUI Error: Controller not initialized (Open API first)";
+            gui_status_.clear();
+        }
+        else if (!controller_->is_streaming()) {
+            gui_error_ = "Core is NOT STREAMING. Start streaming first.";
+            gui_status_.clear();
+        }
+        else {
+            const double ts = now_steady_seconds();
+            controller_->on_marker_pre(Marker::SPACE_DOWN, ts);
+            gui_status_ = "GUI: Simulated SPACE_DOWN (saved 2s pre-trigger epoch)";
+            gui_error_.clear();
+            
+        }
+    }
+
+    if (ImGui::Button("Sim SPACE_DOWN (save before and after 2s)", ImVec2(260, 0))) {
+        if (!controller_) {
+            gui_error_ = "GUI Error: Controller not initialized (Open API first)";
+            gui_status_.clear();
+        }
+        else if (!controller_->is_streaming()) {
+            gui_error_ = "Core is NOT STREAMING. Start streaming first.";
+            gui_status_.clear();
+        }
+        else {
+            const double ts = now_steady_seconds();
+            controller_->on_marker_pre_post(Marker::SPACE_DOWN, ts);
+            gui_status_ = "GUI: Simulated SPACE_DOWN (saved 2s pre + 2s post)";
+            gui_error_.clear();
+            
+        }
+    }
+
+    ImGui::EndChild();
+    ImGui::Dummy(ImVec2(0, pad));
+
 
     ImGui::EndChild(); // right_col
     ImGui::End();      // MainLayout
 }
+
+
+    
 
 // ----------------------
 // Main loop
@@ -661,3 +798,4 @@ int EEGGuiApp::run() {
     stop_streaming_();
     return 0;
 }
+

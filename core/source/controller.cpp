@@ -29,7 +29,56 @@ emit_command(Direction::Left)
 #include <sstream>
 
 
+namespace config {
+    inline constexpr double kPreSec = 1.0;
+    inline constexpr double kPostSec = 1.0;
+}
+
+
 namespace {
+
+    static const char* marker_to_cstr(Marker m) {
+        switch (m) {
+        case Marker::SPACE_DOWN: return "SPACE_DOWN";
+        case Marker::SPACE_UP:   return "SPACE_UP";
+        default:                 return "UNKNOWN";
+        }
+    }
+
+    static const char* direction_to_cstr(const std::optional<Direction>& d) {
+        if (!d) return "NONE";
+        switch (*d) {
+        case Direction::Left:     return "Left";
+        case Direction::Right:    return "Right";
+        case Direction::Up:       return "Up";
+        case Direction::Down:     return "Down";
+        case Direction::ZOOM_IN:  return "ZOOM_IN";
+        case Direction::ZOOM_OUT: return "ZOOM_OUT";
+        default:                  return "UNKNOWN";
+        }
+    }
+
+    inline const char* marker_to_str(Marker m) {
+        switch (m) {
+        case Marker::SPACE_DOWN: return "SPACE_DOWN";
+        case Marker::SPACE_UP:   return "SPACE_UP";
+        default:                 return "UNKNOWN";
+        }
+    }
+
+    inline const char* direction_to_str(Direction d) {
+        switch (d) {
+        case Direction::Left:     return "Left";
+        case Direction::Right:    return "Right";
+        case Direction::Up:       return "Up";
+        case Direction::Down:     return "Down";
+        case Direction::ZOOM_IN:  return "ZOOM_IN";
+        case Direction::ZOOM_OUT: return "ZOOM_OUT";
+        default:                  return "UNKNOWN";
+        }
+    }
+
+
 void save_epoch_binary(const std::string& output_dir,
                        const std::vector<EEGSample>& epoch,
                        double ts) {
@@ -63,37 +112,41 @@ void save_epoch_binary(const std::string& output_dir,
 
 void save_epoch_csv(const std::string& output_dir,
     const std::vector<EEGSample>& epoch,
-    double ts) {
+    const EpochMeta& meta)
+{
     if (output_dir.empty() || epoch.empty()) return;
 
     std::error_code ec;
     std::filesystem::create_directories(output_dir, ec);
     if (ec) return;
 
-    const int chN = (int)epoch.front().channels.size();
+    const int chN = static_cast<int>(epoch.front().channels.size());
     if (chN <= 0) return;
 
-    const std::string filename = output_dir + "/epoch_" + std::to_string(ts) + ".csv";
+    const std::string filename =
+        output_dir + "/epoch_" + std::to_string(meta.trigger_ts) + ".csv";
 
     std::ofstream out(filename);
     if (!out) return;
 
     // header
-    out << "timestamp_sec";
+    out << "trigger_ts,marker,direction,timestamp_sec";
     for (int ch = 0; ch < chN; ++ch) out << ",ch" << ch;
     out << "\n";
 
     out << std::fixed << std::setprecision(6);
 
-    // rows
     for (const auto& s : epoch) {
-		out << s.timestamp_sec; // timestamp
-        for (int ch = 0; ch < chN; ++ch) {
-            out << "," << s.channels[ch];
-        }
+        out << meta.trigger_ts << ","
+            << marker_to_str(meta.marker) << ","
+            << direction_to_cstr(meta.direction) << ","
+            << s.timestamp_sec;
+
+        for (int ch = 0; ch < chN; ++ch) out << "," << s.channels[ch];
         out << "\n";
     }
 }
+
 
 //inference 빠르게 하기 위한 단순화 버전
 Direction infer_direction_fast(const std::vector<EEGSample>& epoch) {
@@ -103,6 +156,36 @@ Direction infer_direction_fast(const std::vector<EEGSample>& epoch) {
     return acc >= 0.0 ? Direction::Right : Direction::Left;
 }
 } // namespace
+
+
+
+
+
+
+
+void Controller::set_pending_meta_(const EpochMeta& m) {
+    {
+        std::lock_guard<std::mutex> lk(pending_meta_mtx_);
+        pending_meta_ = m;
+    }
+    pending_meta_valid_.store(true, std::memory_order_release);
+}
+
+EpochMeta Controller::consume_pending_meta_(double fallback_trigger_ts, Marker fallback_marker) {
+    EpochMeta m;
+    bool ok = pending_meta_valid_.exchange(false, std::memory_order_acq_rel);
+    if (ok) {
+        std::lock_guard<std::mutex> lk(pending_meta_mtx_);
+        m = pending_meta_;
+    }
+    else {
+        m.trigger_ts = fallback_trigger_ts;
+        m.marker = fallback_marker;
+        m.direction.reset();
+    }
+    
+    return m;
+}
 
 // need change thread safety
 Controller::Controller(EEGDevice& device, LSLBridge& lsl)
@@ -197,9 +280,9 @@ void Controller::process_commands() {
             } 
 
               else if constexpr (std::is_same_v<T, CmdSaveEpoch>) {
-                do_save_epoch(c.epoch, c.ts);
+                do_save_epoch(c.epoch, c.meta);
             } else if constexpr (std::is_same_v<T, CmdInferEpoch>) {
-                do_infer_epoch(c.epoch, c.ts);
+                do_infer_epoch(c.epoch, c.meta);
             }
             
               else if constexpr (std::is_same_v<T, CmdDeviceOpen>) {
@@ -455,38 +538,49 @@ void Controller::on_eeg_sample(const EEGSample& sample) {
         stats_.samples_total++;
     }
 
-    // Always keep continuous history
     ring_.push(sample);
 
-    // Only collect epoch samples when armed
-    if (fixed_epoch_armed_.load(std::memory_order_acquire)) {
-        const double end_ts = fixed_epoch_end_ts_.load(std::memory_order_acquire);
+    if (!fixed_epoch_armed_.load(std::memory_order_acquire))
+        return;
 
-        // Collect up to end_ts (inclusive)
-        if (sample.timestamp_sec <= end_ts) {
-            epoch_.push(sample);
+    const double end_ts = fixed_epoch_end_ts_.load(std::memory_order_acquire);
+
+    // post 구간 수집 (end_ts까지)
+    if (sample.timestamp_sec <= end_ts) {
+        std::lock_guard<std::mutex> lk(epoch_mtx_);
+        epoch_.push(sample);
+    }
+
+    // end 도달 → finalize 1회
+    if (sample.timestamp_sec >= end_ts) {
+        bool expected = true;
+        if (!fixed_epoch_armed_.compare_exchange_strong(
+            expected, false, std::memory_order_acq_rel))
+            return;
+
+        std::vector<EEGSample> v;
+        {
+            std::lock_guard<std::mutex> lk(epoch_mtx_);
+            v = epoch_.end(end_ts, config::kMinEpochSeconds);
         }
+        if (v.empty()) return;
 
-        // Finalize once we reached the end
-        if (sample.timestamp_sec >= end_ts) {
-            bool expected = true;
-            if (fixed_epoch_armed_.compare_exchange_strong(
-                expected, false, std::memory_order_acq_rel)) {
+        auto payload = std::make_shared<std::vector<EEGSample>>(std::move(v));
+        std::shared_ptr<const std::vector<EEGSample>> ro = payload;
 
-                auto v = epoch_.end(end_ts, 0.0);
-                if (v.empty()) return;
+        // ✅ meta는 SPACE_DOWN 때 저장해둔 것을 가져온다
+        EpochMeta meta = consume_pending_meta_(/*fallback*/ end_ts, Marker::SPACE_DOWN);
+        // 여기서 meta.trigger_ts가 SPACE_DOWN로 유지되게 하고 싶으면:
+        // consume_pending_meta_가 "덮어쓰기 안 하게" 구현되어 있어야 함.
 
-                auto payload = std::make_shared<std::vector<EEGSample>>(std::move(v));
-                std::shared_ptr<const std::vector<EEGSample>> ro = payload;
+        if (do_label_.load(std::memory_order_relaxed))
+            post(CmdSaveEpoch{ ro, meta });
 
-                if (do_label_.load(std::memory_order_relaxed))
-                    post(CmdSaveEpoch{ ro, end_ts });
-                if (do_infer_.load(std::memory_order_relaxed))
-                    post(CmdInferEpoch{ ro, end_ts });
-            }
-        }
+        if (do_infer_.load(std::memory_order_relaxed))
+            post(CmdInferEpoch{ ro, meta });
     }
 }
+
 
 
 
@@ -520,6 +614,11 @@ void Controller::push_vis_sample_(const EEGSample& s) {
 
 // -------------------- ts ~ ts + 2 epoch save ----------------
 void Controller::on_marker(Marker marker, double ts) {
+    EpochMeta meta;
+    meta.trigger_ts = ts;
+    meta.marker = marker;
+    set_pending_meta_(meta);
+
     {
         std::lock_guard<std::mutex> lk(stats_mtx_);
         stats_.marker_count++;
@@ -536,6 +635,9 @@ void Controller::on_marker(Marker marker, double ts) {
 
 // -------------------- ts - 2 ~ ts epoch save ----------------
 void Controller::on_marker_pre(Marker marker, double ts) {
+    EpochMeta meta;
+    meta.trigger_ts = ts;
+    meta.marker = marker;
     {
         std::lock_guard<std::mutex> lk(stats_mtx_);
         stats_.marker_count++;
@@ -559,36 +661,55 @@ void Controller::on_marker_pre(Marker marker, double ts) {
     std::shared_ptr<const std::vector<EEGSample>> ro = payload;
 
     if (do_label_.load(std::memory_order_relaxed))
-        post(CmdSaveEpoch{ ro, ts });
+        post(CmdSaveEpoch{ ro, meta });
 
     if (do_infer_.load(std::memory_order_relaxed))
-        post(CmdInferEpoch{ ro, ts });
+        post(CmdInferEpoch{ ro, meta });
 }
 
 // -------------------- ts - 2 ~ ts + 2 epoch save ----------------
-void Controller::on_marker_pre_post(Marker marker, double t) {
-    {
-        std::lock_guard<std::mutex> lk(stats_mtx_);
-        stats_.marker_count++;
-    }
-
+void Controller::on_marker_pre_post(Marker marker, double ts_down) {
     if (!config::kUseMarkerEpoching) return;
     if (!armed_.load(std::memory_order_relaxed)) return;
     if (state_.load(std::memory_order_relaxed) != State::STREAMING) return;
-
     if (marker != Marker::SPACE_DOWN) return;
 
-    const double t0 = t - 2.0;
-    const double tend = t + 2.0;
+    // 이미 진행중이면 정책 선택: 무시 or 리셋
+    if (fixed_epoch_armed_.load(std::memory_order_acquire)) {
+        // 여기서는 "무시" 권장 (중복 trial 방지)
+        return;
+    }
 
-    // 1) seed past [t-2, t] from ring history
-    auto pre = ring_.slice(t0, t);
-    epoch_.seed(t0, std::move(pre));
+    // 1) meta 저장 (SPACE_DOWN 기준)
+    EpochMeta meta;
+    meta.trigger_ts = ts_down;
+    meta.marker = Marker::SPACE_DOWN;
+    meta.direction.reset(); // label 파싱하면 여기 넣기
+    set_pending_meta_(meta);
 
-    // 2) arm future end
+    // 2) pre slice seed
+    const double t0 = ts_down - config::kPreSec;
+    const double tend = ts_down + config::kPostSec;
+
+    auto pre = ring_.slice(t0, ts_down);
+    if (pre.empty()) return;
+
+    {
+        std::lock_guard<std::mutex> lk(epoch_mtx_); // ✅ thread safety
+        epoch_.clear();
+        epoch_.seed(t0, std::move(pre));
+    }
+
+    // 3) arm post collection
     fixed_epoch_end_ts_.store(tend, std::memory_order_release);
     fixed_epoch_armed_.store(true, std::memory_order_release);
+
+    {
+        std::lock_guard<std::mutex> lk(stats_mtx_);
+        stats_.last_status = "Epoch armed (pre+post)";
+    }
 }
+
 
 
 
@@ -612,30 +733,41 @@ void Controller::end_epoch(double ts) {
     auto payload = std::make_shared<std::vector<EEGSample>>(std::move(v));
     std::shared_ptr<const std::vector<EEGSample>> ro = payload; // implicit upcast to const
 
+    EpochMeta meta;
+    meta.trigger_ts = ts;
+    meta.marker = Marker::SPACE_UP;   // end marker 기준으로 저장 (원하면 SPACE_DOWN으로도 가능)
+    meta.direction.reset();
+
     if (do_label_.load(std::memory_order_relaxed))
-        post(CmdSaveEpoch{ ro, ts });
+        post(CmdSaveEpoch{ ro, meta });
 
     if (do_infer_.load(std::memory_order_relaxed))
-        post(CmdInferEpoch{ ro, ts });
+        post(CmdInferEpoch{ ro, meta });
+
 }
 
-void Controller::do_save_epoch(std::shared_ptr<const std::vector<EEGSample>> epoch, double ts) {
+void Controller::do_save_epoch(std::shared_ptr<const std::vector<EEGSample>> epoch,
+    const EpochMeta& meta)
+{
     if (!epoch || epoch->empty()) return;
     if (!do_label_.load(std::memory_order_relaxed)) return;
 
-    save_epoch_binary(output_dir_, *epoch, ts);
-    save_epoch_csv(output_dir_, *epoch, ts);
+    save_epoch_csv(output_dir_, *epoch, meta);
 }
 
-void Controller::do_infer_epoch(std::shared_ptr<const std::vector<EEGSample>> epoch, double ts) {
+
+void Controller::do_infer_epoch(std::shared_ptr<const std::vector<EEGSample>> epoch,
+    const EpochMeta& meta)
+{
     if (!epoch || epoch->empty()) return;
     if (!do_infer_.load(std::memory_order_relaxed)) return;
 
     if (config::kEnableOnlineInference) {
         const auto dir = infer_direction_fast(*epoch);
-        lsl_.send_direction(dir, ts);
+        lsl_.send_direction(dir, meta.trigger_ts);
     }
 }
+
     
 
 
@@ -651,41 +783,28 @@ void Controller::do_clear_epoch() {
 
 // ------------------- LSL_Marker ----------------------------------------
 void Controller::on_marker_text(const std::string& text, double ts) {
-    // expected:
-    // "SPACE_DOWN|label|unity_rt=...|lsl=..."
-
-    if (text.rfind("SPACE_DOWN|", 0) == 0) {
-        std::vector<std::string> parts;
-        std::stringstream ss(text);
-        std::string item;
-
-        while (std::getline(ss, item, '|'))
-            parts.push_back(item);
-
-        const std::string label =
-            (parts.size() > 1) ? parts[1] : "UNKNOWN";
-
-        // 핵심: SPACE_DOWN 이벤트 발생
-        on_marker(Marker::SPACE_DOWN, ts);
-
-        // (선택) 상태 표시
-        {
-            std::lock_guard<std::mutex> lk(stats_mtx_);
-            stats_.last_status = "Marker: SPACE_DOWN (" + label + ")";
-        }
+    if (text.rfind("SPACE_DOWN", 0) == 0) {
+        // label 파싱해서 meta.direction 넣고 싶으면 여기서 파싱 후 set_pending_meta_에 넣어도 됨
+        on_marker_pre_post(Marker::SPACE_DOWN, ts);
         return;
     }
 
     if (text.rfind("SPACE_UP", 0) == 0) {
-        on_marker(Marker::SPACE_UP, ts);
+        // pre+post에서는 SPACE_UP가 종료 트리거가 아님
+        {
+            std::lock_guard<std::mutex> lk(stats_mtx_);
+            stats_.marker_count++;
+            stats_.last_status = "Marker: SPACE_UP";
+        }
         return;
     }
 
-    // fallback
     {
         std::lock_guard<std::mutex> lk(stats_mtx_);
         stats_.last_status = "Unknown marker: " + text;
     }
 }
+
+
 
 

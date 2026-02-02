@@ -75,13 +75,14 @@ public:
 
     struct CmdSaveEpoch {
         std::shared_ptr<const std::vector<EEGSample>> epoch;
-        double ts = 0.0;
+        EpochMeta meta;
     };
 
     struct CmdInferEpoch {
         std::shared_ptr<const std::vector<EEGSample>> epoch;
-        double ts = 0.0;
+        EpochMeta meta;
     };
+
 
 
 
@@ -136,6 +137,7 @@ public:
 private:
     RingBuffer ring_{4096};   // display용
     EpochBuffer epoch_;       // SPACE_DOWN~UP
+    mutable std::mutex epoch_mtx_;
 
 private:
     // visualization ring buffer
@@ -165,8 +167,8 @@ private:
     void do_change_running_mode();
     void do_clear_epoch();
     // controller.hpp (private에 추가)
-    void do_save_epoch(std::shared_ptr<const std::vector<EEGSample>> epoch, double ts);
-    void do_infer_epoch(std::shared_ptr<const std::vector<EEGSample>> epoch, double ts);
+    void do_save_epoch(std::shared_ptr<const std::vector<EEGSample>> epoch, const EpochMeta& meta);
+    void do_infer_epoch(std::shared_ptr<const std::vector<EEGSample>> epoch, const EpochMeta& meta);
 
 
     // Epoch helpers (thread-safe)
@@ -183,6 +185,10 @@ private:
     // Queue
     void enqueue(Command&& cmd); //Purpose: push a command into the command queue safely.
                                  //lock the command queue mutex, push the command
+
+    void set_pending_meta_(const EpochMeta& m);
+    EpochMeta consume_pending_meta_(double fallback_trigger_ts, Marker fallback_marker);
+
 
 private:
     EEGDevice& device_;
@@ -213,6 +219,13 @@ private:
     // Stats (snapshot)
     mutable std::mutex stats_mtx_;
     Stats stats_;
+
+    // For fixed epoch (pre+post) meta propagation
+    std::mutex pending_meta_mtx_;
+    EpochMeta pending_meta_{};
+    std::atomic<bool> pending_meta_valid_{ false };
+
+
 };
 
 
