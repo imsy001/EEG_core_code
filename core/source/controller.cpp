@@ -103,6 +103,55 @@ namespace {
         }
     }
 
+    static void normalize_epoch_length(std::vector<EEGSample>& epoch,
+        int targetN,
+        int nch)
+    {
+        if (targetN <= 0 || nch <= 0) return;
+        if (epoch.empty()) return;
+
+        // =========================
+        // (0) 채널 수 정규화 (안전)
+        // =========================
+        for (auto& s : epoch) {
+            if ((int)s.channels.size() < nch)
+                s.channels.resize((size_t)nch, 0.0f);
+            else if ((int)s.channels.size() > nch)
+                s.channels.resize((size_t)nch);
+        }
+
+        // =========================
+        // (1) 너무 길면 → 뒤에서 targetN개 유지
+        // =========================
+        if ((int)epoch.size() > targetN) {
+            epoch.erase(epoch.begin(), epoch.end() - targetN);
+            return;
+        }
+
+        // =========================
+        // (2) 부족하면 → 뒤에 0-padding
+        // =========================
+        const int curN = (int)epoch.size();
+        if (curN < targetN) {
+            const double dt = (curN >= 2)
+                ? (epoch.back().timestamp_sec - epoch.front().timestamp_sec) / double(curN - 1)
+                : (1.0 / 250.0); // fallback (가능하면 sample_rate 사용)
+
+            const double last_ts = epoch.back().timestamp_sec;
+
+            epoch.reserve((size_t)targetN);
+            for (int i = curN; i < targetN; ++i) {
+                EEGSample z;
+                z.timestamp_sec = last_ts + (i - curN + 1) * dt;
+                z.channels.assign((size_t)nch, 0.0f);
+                epoch.push_back(std::move(z));
+            }
+        }
+    }
+
+
+
+
 
 void save_epoch_binary(const std::string& output_dir,
                        const std::vector<EEGSample>& epoch,
@@ -242,6 +291,21 @@ void Controller::cut_and_post_pre_only_(double ts_exec, const EpochMeta& meta)
         log_push_(oss.str());
         return;
     }
+
+    // =========================
+    // ✅ 여기 넣으면 됨 (post 이전, move 이전)
+    // =========================
+    const int targetN = 250; // 1초
+    const int nch = 27;
+
+    normalize_epoch_length(v, targetN, nch);
+
+    {
+        std::ostringstream oss;
+        oss << "[CUT] normalized to targetN=" << targetN << " now n=" << v.size();
+        log_push_(oss.str());
+    }
+
 
     auto payload = std::make_shared<std::vector<EEGSample>>(std::move(v));
     std::shared_ptr<const std::vector<EEGSample>> ro = payload;
