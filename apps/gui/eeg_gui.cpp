@@ -620,24 +620,26 @@ void EEGGuiApp::draw_ui_() {
     ImGui::Separator();
 
     static char out_dir[256] = "./data";
-    static char out_name[256] = "session_001";
-
+    
     ImGui::InputText("Output dir", out_dir, IM_ARRAYSIZE(out_dir));
-    ImGui::InputText("File name", out_name, IM_ARRAYSIZE(out_name));
-
+    
     if (ImGui::Button("Apply Path", ImVec2(140, 0))) {
         if (!controller_) {
             gui_error_ = "Controller not initialized (Open API first)";
             gui_status_.clear();
         }
         else {
-            controller_->post(
-                Controller::CmdSetOutputDir{ std::string(out_dir) }
-            );
-            gui_status_ = std::string("GUI: Output dir set: ") + out_dir;
+            std::string full_dir = std::string(out_dir);
+            if (full_dir.back() != '/' && full_dir.back() != '\\') full_dir += "/";
+            
+
+            controller_->post(Controller::CmdSetOutputDir{ full_dir });
+
+            gui_status_ = "GUI: Output dir set: " + full_dir;
             gui_error_.clear();
         }
     }
+
 
     ImGui::EndChild();
 

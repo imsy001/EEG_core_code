@@ -148,8 +148,15 @@ void save_epoch_csv(const std::string& output_dir,
     const int chN = static_cast<int>(epoch.front().channels.size());
     if (chN <= 0) return;
 
-    const std::string filename =
-        output_dir + "/epoch_" + std::to_string(meta.trigger_ts) + ".csv";
+    std::ostringstream oss;
+    oss << output_dir << "/epoch";
+
+    if (!meta.label.empty()) oss << "_" << meta.label;
+
+    oss << "_" << std::fixed << std::setprecision(6)
+        << meta.trigger_ts << ".csv";
+
+    const std::string filename = oss.str();
 
     std::ofstream out(filename);
     if (!out) { std::cout << "[SAVE] open failed: " << filename << "\n"; return; }
